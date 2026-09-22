@@ -38,6 +38,16 @@ binary, so it also proves that all URLs and the MD5 checksum are correct.
 - `blueprints/automation/formatbce/` — Home Assistant automation blueprints, imported by raw GitHub URL.
 - `readme/`, `casing/` — user documentation and 3D print files.
 
+### Fork addition: Brick Assistant package
+
+This fork (adman234) also carries `config/common/brick-assistant-base.yaml`. It is a second, independent package for
+the "Brick Assistant" hardware mapping: the button on GPIO4 is an input, the XMOS mute button doubles as volume up, and
+there are siren and notification switches. The owner's two satellites use it through the thin files in
+`config/devices/`, which pull the base from `adman234/Respeaker-Lite-ESPHome-integration@main`. It follows the same LED
+rule as below (`control_leds` owns the LED), but it has its own priority chain and per-phase colour lights. Design
+notes and history are in `readme/brick-assistant-notes.md`. Keep `respeaker-satellite-base.yaml` identical to
+upstream so that it can keep syncing.
+
 ## Important: the source of truth is GitHub, not the working tree
 
 `external_components` in the base YAML pulls `respeaker_lite` from this repository at `ref: main`, and it pulls a patched

@@ -1,0 +1,1441 @@
+# Brick Assistant: shared body for ReSpeaker Lite (XIAO ESP32-S3) satellites.
+#
+# Pulled in by the thin per-device files in config/devices/. A device file sets the
+# substitutions below plus its own API key, and can append extra wake word models.
+#
+# Hardware mapping is the Brick Assistant one (differs from respeaker-satellite-base.yaml):
+#   GPIO1  WS2812 status LED        GPIO4  user button (volume down / stop)
+#   GPIO2  XMOS reset               XMOS mute button doubles as volume up (fast double toggle)
+#
+# LED rule: never drive led_internal from an automation. Update the state that
+# control_leds reads (a global, a switch, a phase), then `script.execute: control_leds`.
+
+substitutions:
+  # Required from the device file
+  name: respeaker-lite
+  friendly_name: ReSpeaker Lite
+  # Fallback hotspot name shown when Wi-Fi is unreachable. Make it unique per device.
+  ap_ssid: "Respeaker-Lite Hotspot"
+
+  # Voice assistant phases (same numbering as Voice PE / Koala)
+  voice_assist_idle_phase_id: '1'
+  voice_assist_waiting_for_command_phase_id: '2'
+  voice_assist_listening_for_command_phase_id: '3'
+  voice_assist_thinking_phase_id: '4'
+  voice_assist_replying_phase_id: '5'
+  voice_assist_not_ready_phase_id: '10'
+  voice_assist_error_phase_id: '11'
+
+  # Transient LED feedback kinds (led_feedback global)
+  led_feedback_none: '0'
+  led_feedback_volume_limit: '1'
+  led_feedback_stop_word: '2'
+
+  # Sounds
+  brick_sounds_url: https://github.com/Stepyon/Respeaker-Lite-ESPHome-BrickAssistant/raw/refs/heads/BrickAssistant/sounds
+  error_cloud_expired_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: false
+  project:
+    name: diycraic.brick_assistant
+    version: 2026.09.22
+  min_version: 2026.6.0
+  platformio_options:
+    board_build.flash_mode: dio
+  on_boot:
+    - priority: 375
+      then:
+        - sensor.template.publish:
+            id: next_timer
+            state: -1
+        - script.execute: control_leds
+        # If Home Assistant still hasn't connected after 10 minutes, stop showing
+        # the "booting" animation and fall through to the "no connection" one.
+        - delay: 10min
+        - if:
+            condition:
+              lambda: return id(init_in_progress);
+            then:
+              - lambda: id(init_in_progress) = false;
+              - script.execute: control_leds
+  on_shutdown:
+    then:
+      # Prevent loud noise on software restart
+      - lambda: id(respeaker).mute_speaker();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  cpu_frequency: 240MHz
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+
+      # Moves instructions and read only data from flash into PSRAM on boot.
+      # Both enabled allows instructions to execute while a flash operation is in progress without needing to be placed in IRAM.
+      # Considerably speeds up mWW at the cost of using more PSRAM.
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"  # TLS1.3 support isn't enabled by default in IDF 5.1.5
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+network:
+  enable_ipv6: true
+
+logger:
+  level: DEBUG
+  initial_level: WARN
+  logs:
+    sensor: WARN  # avoids logging debug sensor updates
+
+api:
+  id: api_id
+  actions:
+    - action: start_va
+      then:
+        - voice_assistant.start
+    - action: stop_va
+      then:
+        - voice_assistant.stop
+  on_client_connected:
+    - logger.log: "Client connected"
+    - script.execute: control_leds
+  on_client_disconnected:
+    - logger.log: "Client disconnected"
+    - voice_assistant.stop:
+    - script.execute: control_leds
+
+ota:
+  - platform: esphome
+
+wifi:
+  id: wifi_id
+  use_address: ${name}.local
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  output_power: 12.5 # Decrease TX power to ~12 dBm (helps with wifi stability for some reason)
+  on_connect:
+    - logger.log: "wifi connected"
+    - script.execute: control_leds
+  on_disconnect:
+    - logger.log: "wifi disconnected"
+    - script.execute: control_leds
+  ap:
+    ssid: ${ap_ssid}
+    password: !secret respeaker_ap_password
+
+captive_portal:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/formatBCE/esphome
+      ref: respeaker_microphone
+    components:
+      - i2s_audio
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/formatBCE/Respeaker-Lite-ESPHome-integration
+      ref: main
+    components:
+      - respeaker_lite
+    refresh: 0s
+
+############################
+# AUDIO HARDWARE
+############################
+audio_dac:
+  - platform: aic3204
+    id: aic3204_dac
+    i2c_id: internal_i2c
+
+i2s_audio:
+  - id: i2s_output
+    i2s_lrclk_pin:
+      number: GPIO7
+      allow_other_uses: true
+    i2s_bclk_pin:
+      number: GPIO8
+      allow_other_uses: true
+    i2s_mclk_pin:
+      number: GPIO9
+      allow_other_uses: true
+
+  - id: i2s_input
+    i2s_lrclk_pin:
+      number: GPIO7
+      allow_other_uses: true
+    i2s_bclk_pin:
+      number: GPIO8
+      allow_other_uses: true
+    i2s_mclk_pin:
+      number: GPIO9
+      allow_other_uses: true
+
+i2c:
+  - id: internal_i2c
+    sda: GPIO5
+    scl: GPIO6
+    frequency: 400kHz
+
+microphone:
+  - platform: i2s_audio
+    id: i2s_mics
+    i2s_din_pin: GPIO44
+    adc_type: external
+    pdm: false
+    sample_rate: 48000
+    bits_per_sample: 32bit
+    i2s_mode: secondary
+    i2s_audio_id: i2s_input
+    channel: stereo
+
+speaker:
+  # Hardware speaker output
+  - platform: i2s_audio
+    id: i2s_audio_speaker
+    sample_rate: 48000
+    i2s_mode: secondary
+    i2s_dout_pin: GPIO43
+    bits_per_sample: 32bit
+    i2s_audio_id: i2s_output
+    dac_type: external
+    channel: mono # Change to stereo if you are using stereo external speakers
+    timeout: never
+    buffer_duration: 500ms
+    audio_dac: aic3204_dac
+
+  # Virtual speakers to combine the announcement and media streams together into one output
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: i2s_audio_speaker
+    num_channels: 1 # Change to 2 if you are using stereo external speakers
+    task_stack_in_psram: true
+    source_speakers:
+      - id: announcement_mixing_input
+        timeout: never
+      - id: media_mixing_input
+        timeout: never
+
+  # Virtual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: false
+
+audio_file:
+  - id: siren_sound
+    file: ${brick_sounds_url}/siren.wav
+  - id: timer_finished_sound
+    file: ${brick_sounds_url}/timer_finished.flac
+  - id: wake_word_triggered_sound
+    file: ${brick_sounds_url}/wake_word_triggered.flac
+  - id: button_press_sound
+    file: ${brick_sounds_url}/click.mp3
+  - id: notification_sound
+    file: ${brick_sounds_url}/notification.mp3
+  - id: connection_problem_sound
+    file: ${brick_sounds_url}/connection_problem.mp3
+  - id: error_cloud_expired_sound
+    file: ${error_cloud_expired_sound_file}
+
+media_source:
+  - platform: audio_file
+    id: audio_file_announcement_source
+  - platform: audio_http
+    id: http_announcement_source
+    buffer_size: 250000
+  - platform: audio_http
+    id: http_media_source
+    buffer_size: 500000
+  - platform: sendspin
+    id: sendspin_media_source
+    fixed_delay: 480 microseconds  # The AIC3204 DAC used, as configured, on the VPE delays audio by 480 microseconds
+
+media_player:
+  - platform: sendspin
+    id: sendspin_group_media_player
+  - platform: speaker_source
+    id: external_media_player
+    name: Media Player
+    announcement_pipeline:
+      format: FLAC     # FLAC is the least processor intensive codec
+      num_channels: 1  # Stereo audio is unnecessary for announcements
+      sample_rate: 48000
+      speaker: announcement_resampling_speaker
+      sources:
+        - audio_file_announcement_source
+        - http_announcement_source
+    media_pipeline:
+      format: FLAC     # FLAC is the least processor intensive codec
+      num_channels: 1
+      sample_rate: 48000
+      speaker: media_resampling_speaker
+      sources:
+        - http_media_source
+        - sendspin_media_source
+    volume_increment: 0.05
+    volume_min: 0.3
+    volume_max: 0.8
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 30
+          duration: 200ms
+      - wait_until:
+          not:
+            media_player.is_announcing:
+              id: external_media_player
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 500ms
+
+respeaker_lite:
+  id: respeaker
+  reset_pin: GPIO2
+  mute_state:
+    id: mute_state
+    name: Mic muted
+    icon: mdi:microphone-off
+  firmware_version:
+    icon: mdi:application-cog
+    name: XMOS firmware version
+    internal: false
+    id: firmware_version
+  firmware:
+    url: https://github.com/formatBCE/Respeaker-Lite-ESPHome-integration/raw/refs/heads/main/respeaker_lite_i2s_dfu_firmware_48k_v1.1.0.bin
+    version: "1.1.0"
+    md5: 9297155d1bf3eb21a9d4db52a89ea0c6
+    # XMOS flashing runs during setup, before control_leds has anything to show,
+    # so these drive the LED directly.
+    on_begin:
+      - light.turn_on:
+          id: led_internal
+          brightness: 100%
+          red: 0%
+          green: 0%
+          blue: 100%
+          effect: "Slow Pulse"
+    on_end:
+      - light.turn_on:
+          id: led_internal
+          brightness: 100%
+          red: 0%
+          green: 100%
+          blue: 0%
+          effect: "Fast Pulse"
+      - delay: 3s
+      - script.execute: control_leds
+    on_error:
+      - light.turn_on:
+          id: led_internal
+          brightness: 100%
+          red: 100%
+          green: 0%
+          blue: 0%
+          effect: "Fast Pulse"
+      - delay: 3s
+      - script.execute: control_leds
+
+############################
+# STATE
+############################
+globals:
+  # True until Home Assistant first connects (or 10 minutes pass). Drives the boot animation.
+  - id: init_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  # Set from wake word detection until voice_assistant.start has been issued. Stops the
+  # previous turn's on_end from resetting the LED during a barge-in (chime gap).
+  - id: wake_pending
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Short-lived LED feedback (see led_feedback_* substitutions)
+  - id: led_feedback
+    type: int
+    restore_value: no
+    initial_value: ${led_feedback_none}
+  - id: first_active_timer
+    type: voice_assistant::Timer
+    restore_value: no
+  - id: is_timer_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: siren_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: last_toggle_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  - id: saved_volume
+    type: float
+    restore_value: no
+    initial_value: '0.5'
+
+select:
+  - platform: template
+    name: "Wake word sensitivity"
+    id: wake_word_sensitivity
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      # Sets specific wake word probabilities computed for each particular model
+      # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
+      # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
+      # These cutoffs apply only to the specific models included in the firmware: okay_nabu@20241226.3, hey_jarvis@v2, hey_mycroft@v2
+      #
+      # NOTE: this select deliberately does NOT touch the "stop" model, kenobi, or any
+      # custom model a device file adds. "stop" is fixed at 0.4 in micro_wake_word below.
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
+          id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
+          id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH on DipCo
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);    // 0.69 -> 0.376 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH on DipCo (Manifest's default)
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);    // 0.56 -> 0.751 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
+        }
+  - platform: logger
+    id: logger_select
+    name: Logger Level
+    disabled_by_default: true
+
+sensor:
+  - platform: template
+    id: next_timer
+    name: "Next timer"
+    update_interval: never
+    disabled_by_default: true
+    device_class: duration
+    unit_of_measurement: s
+    icon: "mdi:timer"
+
+text_sensor:
+  - platform: template
+    id: next_timer_name
+    name: "Next timer name"
+    icon: "mdi:timer"
+    disabled_by_default: true
+
+button:
+  - platform: restart
+    id: restart_button
+    name: "Restart"
+    entity_category: config
+    disabled_by_default: true
+    icon: "mdi:restart"
+
+############################
+# LED
+############################
+number:
+  # Master brightness for every status animation. Multiplied by the brightness of the
+  # per-phase colour light (LED Listening etc.), so you can dim everything at once.
+  - platform: template
+    id: led_brightness
+    name: "LED Brightness"
+    icon: mdi:brightness-6
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 5
+    max_value: 100
+    step: 5
+    mode: slider
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+    on_value:
+      - script.execute: control_leds
+
+output:
+  # Sink for the colour-picker lights below. They exist only to give Home Assistant a
+  # colour wheel per phase; control_leds reads their values and nothing is driven here.
+  - platform: template
+    id: led_colour_sink
+    type: float
+    write_action:
+      - lambda: (void) state;
+
+light:
+  # Hardware LED. Internal: only control_leds and the XMOS updater drive it.
+  #
+  # Brightness is applied ONCE, by ESPHome's colour correction on every pixel write
+  # (AddressableLight::update_state -> set_local_brightness). Effects must therefore
+  # scale current_color by their animation fraction only, never by brightness again.
+  #
+  # gamma_correct 1.0: with the default 2.8 curve, any value below ~14% of full scale
+  # rounds to 0 on an 8-bit WS2812, which made dim animations flicker or go black.
+  # Perceptual shaping is done inside the effects (fraction squared) instead.
+  - platform: esp32_rmt_led_strip
+    id: led_internal
+    internal: true
+    name: "LED Internal (Hardware)"
+    pin: GPIO1
+    chipset: ws2812
+    num_leds: 1
+    channel_colors: GRB
+    rmt_symbols: 192
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    effects:
+      - addressable_lambda:
+          name: "Slow Pulse"
+          update_interval: 30ms
+          lambda: |-
+            static float f = 0.0f;
+            static bool up = true;
+            f += up ? 0.04f : -0.04f;
+            if (f >= 1.0f) { f = 1.0f; up = false; }
+            else if (f <= 0.0f) { f = 0.0f; up = true; }
+            it[0] = current_color * uint8_t(f * f * 255.0f);
+
+      - addressable_lambda:
+          name: "Fast Pulse"
+          update_interval: 10ms
+          lambda: |-
+            static float f = 0.0f;
+            static bool up = true;
+            f += up ? 0.05f : -0.05f;
+            if (f >= 1.0f) { f = 1.0f; up = false; }
+            else if (f <= 0.0f) { f = 0.0f; up = true; }
+            it[0] = current_color * uint8_t(f * f * 255.0f);
+
+      # Thinking / replying. Breathes between a floor and full rather than to black, so it
+      # never looks like the LED switched off. Deliberately shared by both phases and not
+      # reset on start: the colour changes mid-breath without a hiccup.
+      - addressable_lambda:
+          name: "Breathe"
+          update_interval: 40ms
+          lambda: |-
+            static float f = 0.45f;
+            static bool up = true;
+            f += up ? 0.02f : -0.02f;
+            if (f >= 1.0f) { f = 1.0f; up = false; }
+            else if (f <= 0.45f) { f = 0.45f; up = true; }
+            it[0] = current_color * uint8_t(f * f * 255.0f);
+
+      # Timer running: a short blip once a second.
+      - addressable_lambda:
+          name: "Timer Tick"
+          update_interval: 50ms
+          lambda: |-
+            static uint8_t frame = 0;
+            it[0] = frame == 0 ? current_color : Color::BLACK;
+            frame = (frame + 1) % 20;
+
+  # Per-phase colour pickers. Colour, brightness and on/off are all honoured:
+  # turning one off means "no LED during this phase". "LED Idle" doubles as a
+  # night light / mood light when the assistant is doing nothing.
+  - platform: rgb
+    id: led_colour_idle
+    name: "LED Idle"
+    icon: mdi:lightbulb-night-outline
+    entity_category: config
+    red: led_colour_sink
+    green: led_colour_sink
+    blue: led_colour_sink
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_OFF
+    initial_state:
+      brightness: 30%
+      red: 10%
+      green: 73%
+      blue: 95%
+    on_state:
+      - script.execute: control_leds
+
+  - platform: rgb
+    id: led_colour_listening
+    name: "LED Listening"
+    icon: mdi:ear-hearing
+    entity_category: config
+    red: led_colour_sink
+    green: led_colour_sink
+    blue: led_colour_sink
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_ON
+    initial_state:
+      brightness: 100%
+      red: 50%
+      green: 100%
+      blue: 100%
+    on_state:
+      - script.execute: control_leds
+
+  - platform: rgb
+    id: led_colour_thinking
+    name: "LED Thinking"
+    icon: mdi:head-cog-outline
+    entity_category: config
+    red: led_colour_sink
+    green: led_colour_sink
+    blue: led_colour_sink
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_ON
+    initial_state:
+      brightness: 50%
+      red: 50%
+      green: 100%
+      blue: 100%
+    on_state:
+      - script.execute: control_leds
+
+  - platform: rgb
+    id: led_colour_replying
+    name: "LED Replying"
+    icon: mdi:account-voice
+    entity_category: config
+    red: led_colour_sink
+    green: led_colour_sink
+    blue: led_colour_sink
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_ON
+    initial_state:
+      brightness: 50%
+      red: 0%
+      green: 100%
+      blue: 0%
+    on_state:
+      - script.execute: control_leds
+
+############################
+# SCRIPTS
+############################
+script:
+  # Single owner of the LED. A priority chain: the first matching state wins.
+  # Call it whenever anything it reads changes.
+  - id: control_leds
+    then:
+      - lambda: |-
+          id(check_if_timers_active).execute();
+          if (id(is_timer_active)) {
+            id(fetch_first_active_timer).execute();
+          }
+
+          float master = id(led_brightness).state / 100.0f;
+          if (std::isnan(master)) master = 0.6f;
+          // Floor for states that must stay visible even when the slider is low.
+          const float alert = std::max(master, 0.2f);
+
+          auto off = []() {
+            id(led_internal).turn_off().set_transition_length(0).perform();
+          };
+          auto show = [](float r, float g, float b, float brightness, const char *effect) {
+            auto call = id(led_internal).turn_on();
+            call.set_rgb(r, g, b);
+            call.set_brightness(std::min(std::max(brightness, 0.01f), 1.0f));
+            call.set_effect(std::string(effect));
+            call.perform();
+          };
+          // Use a user-configurable colour light; off means "LED off in this phase".
+          auto show_from = [&](light::LightState *src, const char *effect) {
+            const auto &v = src->remote_values;
+            if (!v.is_on()) { off(); return; }
+            show(v.get_red(), v.get_green(), v.get_blue(), master * v.get_brightness(), effect);
+          };
+
+          const int phase = id(voice_assistant_phase);
+
+          if (id(init_in_progress)) {
+            show(0.09f, 0.73f, 0.95f, alert, id(wifi_id).is_connected() ? "Fast Pulse" : "Slow Pulse");
+          } else if (!id(wifi_id).is_connected() || !id(api_id).is_connected()) {
+            show(1.0f, 0.0f, 0.0f, alert, "Slow Pulse");
+          } else if (id(siren_on)) {
+            show(1.0f, 0.0f, 0.0f, 1.0f, "Fast Pulse");
+          } else if (id(timer_ringing).state) {
+            show(0.0f, 1.0f, 1.0f, alert, "Fast Pulse");
+          } else if (id(notification_ringing).state) {
+            show(0.7f, 1.0f, 1.0f, alert, "None");
+          } else if (id(led_feedback) == ${led_feedback_volume_limit}) {
+            show(0.0f, 0.0f, 1.0f, alert, "None");
+          } else if (id(led_feedback) == ${led_feedback_stop_word}) {
+            show(1.0f, 0.0f, 0.0f, alert, "None");
+          } else if (phase == ${voice_assist_waiting_for_command_phase_id} ||
+                     phase == ${voice_assist_listening_for_command_phase_id}) {
+            show_from(id(led_colour_listening), "Slow Pulse");
+          } else if (phase == ${voice_assist_thinking_phase_id}) {
+            show_from(id(led_colour_thinking), "Breathe");
+          } else if (phase == ${voice_assist_replying_phase_id}) {
+            show_from(id(led_colour_replying), "Breathe");
+          } else if (phase == ${voice_assist_error_phase_id}) {
+            show(1.0f, 0.0f, 0.0f, alert, "Fast Pulse");
+          } else if (phase == ${voice_assist_not_ready_phase_id}) {
+            // Connected to HA, but no Assist pipeline is attached to this device.
+            show(1.0f, 0.5f, 0.0f, alert, "Slow Pulse");
+          } else if (id(is_timer_active)) {
+            show(1.0f, 1.0f, 0.0f, alert, "Timer Tick");
+          } else {
+            show_from(id(led_colour_idle), "None");
+          }
+
+  # Brief LED override (volume limit, stop word). Restarts if triggered again.
+  - id: led_feedback_flash
+    mode: restart
+    parameters:
+      kind: int
+      duration_ms: int
+    then:
+      - lambda: id(led_feedback) = kind;
+      - script.execute: control_leds
+      - delay: !lambda return duration_ms;
+      - lambda: id(led_feedback) = ${led_feedback_none};
+      - script.execute: control_leds
+
+  # Script executed when we want to play sounds on the device.
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: string
+    then:
+      - if:
+          condition:
+            lambda: return priority;
+          then:
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - lambda: |-
+          if ( (id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ) || priority) {
+            id(external_media_player)
+              ->make_call()
+              .set_media_url("audio-file://" + sound_file)
+              .set_announcement(true)
+              .perform();
+          }
+
+  # Timer ring: one looping announcement (repeat_one) instead of while-loops, so a
+  # single owner plays the sound and nothing restarts it mid-playback.
+  - id: ring_timer
+    then:
+      - script.execute: enable_repeat_one
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: "timer_finished_sound"
+
+  - id: enable_repeat_one
+    then:
+      - media_player.repeat_one:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 500ms
+
+  - id: disable_repeat
+    then:
+      - media_player.repeat_off:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 0ms
+
+  - id: fetch_first_active_timer
+    then:
+      - lambda: |-
+          const auto &timers = id(va).get_timers();
+          if (timers.empty()) return;
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.is_active && timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+            }
+          }
+          id(first_active_timer) = output_timer;
+
+  - id: check_if_timers_active
+    then:
+      - lambda: |-
+          bool output = false;
+          for (const auto &timer : id(va).get_timers()) {
+            if (timer.is_active) output = true;
+          }
+          id(is_timer_active) = output;
+
+  - id: publish_timer_sensors
+    then:
+      - lambda: |-
+          id(check_if_timers_active).execute();
+          if (id(is_timer_active)) {
+            id(fetch_first_active_timer).execute();
+            id(next_timer).publish_state(id(first_active_timer).seconds_left);
+            id(next_timer_name).publish_state(id(first_active_timer).name);
+          } else {
+            id(next_timer).publish_state(-1);
+            id(next_timer_name).publish_state("-");
+          }
+
+  - id: send_wake_word_event
+    parameters:
+      wake_word: string
+    then:
+      - homeassistant.event:
+          event: esphome.wake_word_detected
+          data:
+            wake_word: !lambda return wake_word;
+
+  - id: send_tts_uri_event
+    parameters:
+      tts_uri: string
+    then:
+      - homeassistant.event:
+          event: esphome.tts_uri
+          data:
+            uri: !lambda return tts_uri;
+
+  - id: send_stt_text_event
+    parameters:
+      stt_text: string
+    then:
+      - homeassistant.event:
+          event: esphome.stt_text
+          data:
+            text: !lambda return stt_text;
+
+  # Enables the stop word while the device is speaking its response.
+  # Keep mode: single. on_intent_progress fires repeatedly and restart would thrash
+  # the model on/off. The first wait has a timeout so a turn whose announcement never
+  # arrives can't block this script (and therefore the stop word) until reboot.
+  - id: activate_stop_word_once
+    then:
+      - logger.log: "VA: activate_stop_word_once"
+      - wait_until:
+          timeout: 15s
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+      - if:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          then:
+            # Short guard so the wake chime / first syllables of the response don't
+            # trip the model. Raise toward 500ms if you get false stops here.
+            - delay: 250ms
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.enable_model: stop
+                  - wait_until:
+                      not:
+                        media_player.is_announcing:
+                          id: external_media_player
+                  - if:
+                      condition:
+                        switch.is_off: timer_ringing
+                      then:
+                        - micro_wake_word.disable_model: stop
+
+  - id: long_press_delay
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: user_button
+          then:
+            - logger.log: "Detected a long press => Stopping media"
+            - if:
+                condition:
+                  media_player.is_playing:
+                    id: external_media_player
+                then:
+                  - media_player.stop:
+                      id: external_media_player
+
+  - id: timer_autooff_delay
+    mode: restart
+    then:
+      - delay: 10min
+      - switch.turn_off: timer_ringing
+
+  - id: siren_autooff_delay
+    mode: restart
+    then:
+      - delay: 20min
+      - switch.turn_off: siren_ringing
+
+  - id: save_volume
+    then:
+      - lambda: id(saved_volume) = id(external_media_player).volume;
+
+  - id: restore_volume
+    then:
+      - lambda: |-
+          auto call = id(external_media_player).make_call();
+          call.set_volume(id(saved_volume));
+          call.perform();
+
+############################
+# BUTTONS
+############################
+binary_sensor:
+  - platform: gpio
+    id: user_button
+    internal: true
+    name: "Volume Down - Stop Button"
+    pin:
+      number: GPIO4
+      mode:
+        input: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+    on_press:
+      then:
+        - if:
+            condition:
+              switch.is_off: disable_buttons
+            then:
+              - if:
+                  condition:
+                    or:
+                      - switch.is_on: timer_ringing
+                      - switch.is_on: siren_ringing
+                  then:
+                    - logger.log: "Siren/Timer ON => turning OFF"
+                    - switch.turn_off: timer_ringing
+                    - switch.turn_off: siren_ringing
+                  else:
+                    - media_player.volume_set:
+                        id: external_media_player
+                        volume: !lambda |-
+                          float vol = id(external_media_player).volume - 0.05f;
+                          if (vol < 0.1f) {
+                            vol = 0.1f;
+                            id(led_feedback_flash).execute(${led_feedback_volume_limit}, 150);
+                          }
+                          return vol;
+                    - if:
+                        condition:
+                          media_player.is_playing:
+                            id: external_media_player
+                        then:
+                          - script.execute: long_press_delay
+                        else:
+                          - if:
+                              condition:
+                                switch.is_on: button_sound
+                              then:
+                                - script.execute:
+                                    id: play_sound
+                                    priority: false
+                                    sound_file: "button_press_sound"
+    on_release:
+      then:
+        - script.stop: long_press_delay
+
+  # The XMOS mute button is hardware: it always mutes the mics. This sensor adds the
+  # Brick behaviour on top (stop alarms; a fast double toggle = volume up).
+  - platform: template
+    id: mic_mute_button
+    internal: true
+    name: "Volume Up - Mute Button"
+    lambda: |-
+      if (!id(mute_state).has_state()) {
+        return false;
+      }
+      return id(mute_state).state;
+    on_state:
+      then:
+        - if:
+            condition:
+              lambda: return id(mute_state).has_state() && !id(disable_buttons).state;
+            then:
+              - if:
+                  condition:
+                    or:
+                      - switch.is_on: timer_ringing
+                      - switch.is_on: siren_ringing
+                  then:
+                    - switch.turn_off: timer_ringing
+                    - switch.turn_off: siren_ringing
+                    - logger.log: "Siren/Timer is ON => turning Siren/Timer OFF"
+                  else:
+                    - lambda: |-
+                        unsigned long now = millis();
+                        // Fast toggle (<2s) = volume up
+                        if ((now - id(last_toggle_time)) < 2000UL) {
+                          float current_vol = id(external_media_player).volume;
+                          if (current_vol >= 1.0f) {
+                            id(led_feedback_flash).execute(${led_feedback_volume_limit}, 150);
+                          } else {
+                            auto call = id(external_media_player).make_call();
+                            call.set_volume(std::min(current_vol + 0.05f, 1.0f));
+                            call.perform();
+                          }
+                        }
+                        id(last_toggle_time) = now;
+                    - if:
+                        condition:
+                          and:
+                            - switch.is_on: button_sound
+                            - not:
+                                media_player.is_playing:
+                                  id: external_media_player
+                        then:
+                          - script.execute:
+                              id: play_sound
+                              priority: false
+                              sound_file: "button_press_sound"
+
+############################
+# SWITCHES
+############################
+switch:
+  - platform: template
+    id: siren_ringing
+    name: "Siren Ring"
+    optimistic: false
+    restore_mode: ALWAYS_OFF
+    lambda: return id(siren_on);
+    turn_on_action:
+      - globals.set:
+          id: siren_on
+          value: "true"
+      - lambda: id(siren_ringing).publish_state(true);
+      - switch.turn_off: timer_ringing
+      - script.execute: control_leds
+      - media_player.stop:
+          id: external_media_player
+      - delay: 500ms
+      - script.execute: save_volume
+      - media_player.volume_set:
+          id: external_media_player
+          volume: 1.0
+      - script.execute: siren_autooff_delay
+      - while:
+          condition:
+            switch.is_on: siren_ringing
+          then:
+            - script.execute:
+                id: play_sound
+                priority: true
+                sound_file: "siren_sound"
+            - delay: 6s
+            - wait_until:
+                not:
+                  media_player.is_playing:
+                    id: external_media_player
+    turn_off_action:
+      - globals.set:
+          id: siren_on
+          value: "false"
+      - lambda: id(siren_ringing).publish_state(false);
+      - script.stop: siren_autooff_delay
+      - script.execute: control_leds
+      - if:
+          condition:
+            media_player.is_playing:
+              id: external_media_player
+          then:
+            media_player.stop:
+              announcement: false
+              id: external_media_player
+      - script.execute: restore_volume
+
+  - platform: template
+    name: "Timer Ring"
+    id: timer_ringing
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 15
+          duration: 200ms
+      # "stop" silences the ring by voice
+      - micro_wake_word.enable_model: stop
+      - script.execute: ring_timer
+      - script.execute: timer_autooff_delay
+      - script.execute: control_leds
+    on_turn_off:
+      - micro_wake_word.disable_model: stop
+      - script.stop: timer_autooff_delay
+      - script.execute: disable_repeat
+      # Stop the ring mid playback
+      - if:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          then:
+            media_player.stop:
+              announcement: true
+              id: external_media_player
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      - script.execute: control_leds
+
+  - platform: template
+    id: notification_ringing
+    name: "Notification"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 15
+          duration: 200ms
+      - script.execute: control_leds
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: "notification_sound"
+      - wait_until:
+          timeout: 5s
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+      - wait_until:
+          timeout: 60s
+          condition:
+            not:
+              media_player.is_announcing:
+                id: external_media_player
+      - switch.turn_off: notification_ringing
+    on_turn_off:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      - script.execute: control_leds
+
+  # Settings (from Voice PE / Koala)
+  - platform: template
+    id: wake_sound
+    name: Wake sound
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: button_sound
+    name: Button click sounds
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: disable_buttons
+    name: Disable physical controls
+    icon: "mdi:button-pointer"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    disabled_by_default: true
+
+############################
+# MICRO WAKE WORD
+############################
+micro_wake_word:
+  id: mww
+  microphone:
+    microphone: i2s_mics
+    channels: 1
+    gain_factor: 4
+  # Keep inferring during TTS playback: required for wake-word barge-in.
+  stop_after_detection: false
+  models:
+    - model: https://github.com/OHF-Voice/micro-wake-word/releases/download/okay_nabu_20241226.3/okay_nabu.json
+      probability_cutoff: 0.7
+      id: okay_nabu
+    - model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      id: kenobi
+      probability_cutoff: 0.7
+    - model: hey_jarvis
+      id: hey_jarvis
+      probability_cutoff: 0.7
+    - model: hey_mycroft
+      id: hey_mycroft
+      probability_cutoff: 0.8
+    # Internal, so HA never disables it; armed only while speaking or a timer rings.
+    # 0.4 (manifest default 0.5): at 0.2 the residual TTS echo through the XMOS AEC
+    # self-triggered and cut responses off.
+    - model: https://github.com/OHF-Voice/micro-wake-word/releases/download/stop/stop.json
+      probability_cutoff: 0.4
+      id: stop
+      internal: true
+  vad:
+    probability_cutoff: 0.1
+  on_wake_word_detected:
+    - logger.log:
+        format: "Wake word was: %s"
+        args: [ 'wake_word.c_str()' ]
+    - script.execute:
+        id: send_wake_word_event
+        wake_word: !lambda return wake_word;
+    - if:
+        condition:
+          voice_assistant.is_running:
+        then:
+          - voice_assistant.stop:
+    - if:
+        condition:
+          switch.is_on: timer_ringing
+        then:
+          - switch.turn_off: timer_ringing
+    - if:
+        condition:
+          media_player.is_announcing:
+            id: external_media_player
+        then:
+          - media_player.stop:
+              id: external_media_player
+              announcement: true
+    - if:
+        condition:
+          lambda: return wake_word != "Stop";
+        then:
+          - if:
+              condition:
+                lambda: return id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id};
+              then:
+                - lambda: |-
+                    id(wake_pending) = true;
+                    id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+                - script.execute: control_leds
+                - if:
+                    condition:
+                      switch.is_on: wake_sound
+                    then:
+                      - script.execute:
+                          id: play_sound
+                          priority: true
+                          sound_file: "wake_word_triggered_sound"
+                      - delay: 300ms
+                      - wait_until:
+                          timeout: 3s
+                          condition:
+                            not:
+                              media_player.is_announcing:
+                                id: external_media_player
+                - voice_assistant.start:
+                    wake_word: !lambda return wake_word;
+                    silence_detection: true
+                - lambda: id(wake_pending) = false;
+              else:
+                - delay: 1s
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: "connection_problem_sound"
+        else:
+          - logger.log: "Stop wake word was used!"
+          - script.execute:
+              id: led_feedback_flash
+              kind: ${led_feedback_stop_word}
+              duration_ms: 300
+
+############################
+# VOICE ASSISTANT
+############################
+voice_assistant:
+  id: va
+  micro_wake_word: mww
+  use_wake_word: false
+  microphone:
+    microphone: i2s_mics
+    channels: 0
+  noise_suppression_level: 1
+  auto_gain: 31dBFS
+  volume_multiplier: 1
+  media_player: external_media_player
+
+  on_client_connected:
+    - lambda: |-
+        id(init_in_progress) = false;
+        id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - micro_wake_word.start:
+    - script.execute: control_leds
+
+  on_client_disconnected:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+    - script.execute: control_leds
+
+  on_error:
+    # Ignore errors that are normal in day-to-day use
+    - if:
+        condition:
+          lambda: |-
+            return !id(init_in_progress) &&
+                   code != "duplicate_wake_up_detected" &&
+                   code != "stt-no-text-recognized";
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          - script.execute: control_leds
+    - if:
+        condition:
+          lambda: return code == "cloud-auth-failed";
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "error_cloud_expired_sound"
+
+  on_start:
+    - logger.log: "VA: on_start"
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 30  # Number of dB quieter; higher implies more quiet, 0 implies full volume
+        duration: 0.0s
+
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
+
+  on_stt_vad_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+    - script.execute: control_leds
+
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+
+  on_stt_end:
+    # Also covers pipelines that end STT without a VAD end event.
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+    - script.execute:
+        id: send_stt_text_event
+        stt_text: !lambda 'return x;'
+
+  on_intent_progress:
+    - if:
+        condition:
+          # A nonempty x means a streaming TTS url was sent to the media player
+          lambda: 'return !x.empty();'
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+          - script.execute: activate_stop_word_once
+
+  on_tts_start:
+    - logger.log: "VA: on_tts_start"
+    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+    - script.execute: control_leds
+    - script.execute: activate_stop_word_once
+
+  on_tts_end:
+    - script.execute:
+        id: send_tts_uri_event
+        tts_uri: !lambda 'return x;'
+
+  on_end:
+    - wait_until:
+        not:
+          voice_assistant.is_running
+    - logger.log: "VA: on_end"
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 0
+        duration: 1.0s
+    # Leave the error animation up for a moment
+    - if:
+        condition:
+          lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+        then:
+          - delay: 1s
+    # With streaming TTS, on_end fires when the stream ends, not when the audio buffer
+    # drains. Keep the "stop" word armed and the replying LED on until playback ends.
+    - wait_until:
+        timeout: 60s
+        condition:
+          not:
+            media_player.is_announcing:
+              id: external_media_player
+    # A barge-in may have started a new turn meanwhile (or be in its chime gap):
+    # leave that turn's model and LED alone.
+    - if:
+        condition:
+          and:
+            - not:
+                voice_assistant.is_running:
+            - lambda: return !id(wake_pending);
+        then:
+          - if:
+              condition:
+                switch.is_off: timer_ringing
+              then:
+                - micro_wake_word.disable_model: stop
+          - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          - script.execute: control_leds
+
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - script.execute: publish_timer_sensors
+  on_timer_started:
+    - script.execute: publish_timer_sensors
+    - script.execute: control_leds
+  on_timer_cancelled:
+    - script.execute: publish_timer_sensors
+    - script.execute: control_leds
+  on_timer_updated:
+    - script.execute: publish_timer_sensors
+    - script.execute: control_leds
+  on_timer_tick:
+    - script.execute: control_leds
+    - lambda: |-
+        int seconds_left = id(first_active_timer).seconds_left;
+        if (std::abs(seconds_left) % 5 == 0) {
+          id(next_timer).publish_state(seconds_left);
+        }

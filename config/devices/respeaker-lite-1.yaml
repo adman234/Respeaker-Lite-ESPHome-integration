@@ -1,0 +1,31 @@
+# ReSpeaker Lite #1 (Brick Assistant)
+#
+# Everything shared lives in config/common/brick-assistant-base.yaml and is pulled from
+# GitHub at build time. Change behaviour there; only per-device settings belong here.
+#
+# secrets.yaml needs: wifi_ssid, wifi_password, respeaker_ap_password and the API key below.
+
+substitutions:
+  name: respeaker-lite-faed68
+  friendly_name: ReSpeaker-lite-1
+  ap_ssid: "Respeaker-Lite-1 Hotspot"
+
+packages:
+  brick_assistant:
+    url: https://github.com/adman234/Respeaker-Lite-ESPHome-integration
+    ref: main
+    files: [config/common/brick-assistant-base.yaml]
+    refresh: 1d
+
+api:
+  encryption:
+    key: !secret respeaker_lite__speaker_api_key
+
+micro_wake_word:
+  models:
+    # Locally trained custom wake word, selectable from HA's wake-word dropdown.
+    # Absolute path inside the ESPHome container (host:
+    # /mnt/user/appdata/esphome-data/micro_wake_word/robo-joe/). hey_robo_joe.tflite
+    # must sit next to the .json, and its feature_step_size must be 10.
+    - model: /data/micro_wake_word/robo-joe/hey_robo_joe.json
+      id: hey_robo_joe
