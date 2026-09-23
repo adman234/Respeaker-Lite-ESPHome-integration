@@ -1,11 +1,11 @@
-# ReSpeaker Lite + ESPHome + Home Assistant — working notes
+# ReSpeaker Lite + ESPHome + Home Assistant: working notes
 
 Notes from a session working on two Seeed ReSpeaker Lite satellites running the
 "Brick Assistant" ESPHome config (a fork of formatBCE's
 [Respeaker-Lite-ESPHome-integration](https://github.com/formatBCE/Respeaker-Lite-ESPHome-integration)).
 
 Line-number citations below point at the ESPHome `dev` branch and Home Assistant
-`dev` as they were when this was written. They will drift — treat them as "look
+`dev` as they were when this was written. They will drift, so treat them as "look
 near here", not as permanent addresses.
 
 ## Devices
@@ -45,21 +45,21 @@ This is a different hardware mapping from upstream's `respeaker-satellite-base.y
 
 Yes, and the config already had the machinery. Two separate paths:
 
-- **Wake word during a response** — works because `stop_after_detection: false`
+- **Wake word during a response**: works because `stop_after_detection: false`
   keeps microWakeWord inferring continuously, right through TTS playback.
-- **Saying "stop"** — a dedicated `stop` mWW model, armed only while the device
+- **Saying "stop"**: a dedicated `stop` mWW model, armed only while the device
   is talking or a timer is ringing.
 
 None of this would work without acoustic echo cancellation. The ReSpeaker Lite's
 XMOS XU316 does AEC in hardware, which is what lets the mic hear you over the
 speaker. The mic split is `micro_wake_word` → `channels: 1` + `gain_factor: 4`,
 `voice_assistant` → `channels: 0`. That matches formatBCE's upstream base config
-exactly — **do not change it**.
+exactly. **Do not change it**.
 
 ### `voice_assistant: micro_wake_word:` does NOT pause mWW
 
 A common misreading. The key exists only so HA can enumerate and select wake
-words — its only uses are `on_set_configuration()` and `get_configuration()`
+words; its only uses are `on_set_configuration()` and `get_configuration()`
 (`voice_assistant.cpp:1097-1147`). It never stops or starts mWW around the
 pipeline.
 
@@ -76,11 +76,11 @@ freshly-armed model disarmed by the previous turn's pending `on_end`.
 **2. `activate_stop_word_once` could deadlock permanently.**
 Its first `wait_until: media_player.is_announcing` had no timeout. If the
 announcement never arrived (empty/failed TTS, API hiccup) the script blocked
-forever — and because scripts default to `mode: single`, every later call was
+forever, and because scripts default to `mode: single`, every later call was
 silently skipped. Stop word dead until reboot. Fixed with `timeout: 15s` plus a
 re-check afterwards (the wait can now time out rather than succeed).
 
-Keep it at `mode: single`. Do **not** switch to `restart` — `on_intent_progress`
+Keep it at `mode: single`. Do **not** switch to `restart`: `on_intent_progress`
 fires repeatedly and would thrash the model on/off.
 
 **3. `stop` cutoff was 0.2; the model's own manifest says 0.5.**
@@ -90,7 +90,7 @@ and cut responses off. Settled on **0.4**.
 Note this same model silences a ringing timer by voice
 (`timer_ringing.on_turn_on` → `id(stop).enable()`), so the cutoff affects that too.
 
-**4. Cosmetic: 1s deaf window at the start of each response** — reduced to 250ms.
+**4. Cosmetic: 1s deaf window at the start of each response**: reduced to 250ms.
 
 ### Things that are not bugs
 
@@ -98,7 +98,7 @@ Note this same model silences a ringing timer by voice
   (`voice_assistant.cpp:724+`), so the explicit `media_player.stop` in
   `on_wake_word_detected` is redundant but harmless.
 - Saying "stop" only kills the **announcement** pipeline. It will not stop music
-  on the media pipeline — `activate_stop_word_once` only runs from `on_tts_start`
+  on the media pipeline; `activate_stop_word_once` only runs from `on_tts_start`
   / `on_intent_progress`. Say the wake word, then "stop".
 - If AEC still can't keep up, lower `volume_max` (currently `0.8`). That's the
   usual physical limit on barge-in.
@@ -114,7 +114,7 @@ non-internal model** and enables only what HA has selected, with
 `max_active_wake_words = 1` (`voice_assistant.cpp:1097-1115`).
 
 So with `hey_jarvis` selected in HA, `okay_nabu`, `kenobi`, `hey_mycroft` and
-`hey_robo_joe` are all disabled. Disabled is real, not cosmetic — a disabled model
+`hey_robo_joe` are all disabled. Disabled is real, not cosmetic: a disabled model
 has its TFLite interpreter destroyed and tensor arenas freed on the next inference
 call (`streaming_model.h:40-41`). They cost **flash**, not runtime RAM or CPU.
 
@@ -129,12 +129,12 @@ alongside the selected wake word.
 
 Two consequences:
 - Internal models don't persist their enabled state to flash
-  (`streaming_model.cpp:326-331`) — purely runtime-controlled.
+  (`streaming_model.cpp:326-331`), purely runtime-controlled.
 - Only the **first** model in the list is enabled by default
   (`default_enabled = i == 0`, `micro_wake_word/__init__.py:591`), so an internal
   model must be enabled explicitly, e.g. from `api: on_client_connected`.
 
-**To run two wake words simultaneously, the second must be `internal: true`** —
+**To run two wake words simultaneously, the second must be `internal: true`**:
 and it then disappears from HA's dropdown.
 
 ---
@@ -189,11 +189,11 @@ here uses `10`. This is the most likely cause of a failed build.
 
 **The `.tflite` must sit next to the `.json`.** Resolved as
 `manifest_path.parent / manifest["model"]` (`micro_wake_word/__init__.py:464`).
-The tflite path never appears in YAML — it comes from the manifest's `"model"` key.
+The tflite path never appears in YAML; it comes from the manifest's `"model"` key.
 
 **The manifest's `wake_word` string is what everything sees.** It's the label in
 HA's dropdown (not the `id`), and it's what `on_wake_word_detected` lambdas compare
-against — e.g. `wake_word != "Stop"`.
+against, e.g. `wake_word != "Stop"`.
 
 **Models are embedded in the firmware at compile time.** There is no runtime
 download, so hosting on GitHub buys nothing over local files except a build-time
@@ -211,10 +211,10 @@ Path('/config') / Path('/data/micro_wake_word/robo-joe/hey_robo_joe.json')
   -> /data/micro_wake_word/robo-joe/hey_robo_joe.json
 ```
 
-So **an absolute container path works regardless of what the config dir is** —
+So **an absolute container path works regardless of what the config dir is**:
 useful when the model lives outside it.
 
-### ⚠️ `/data/micro_wake_word/` is ESPHome's own cache directory
+### Warning: `/data/micro_wake_word/` is ESPHome's own cache directory
 
 `CORE.data_dir` resolves to `/data` when `ESPHOME_IS_HA_ADDON` or
 `ESPHOME_DATA_DIR` is set (`core/__init__.py:819-824`), and micro_wake_word then
@@ -233,7 +233,7 @@ folder** such as `/mnt/user/appdata/esphome-data/custom_wake_words/robo-joe/`
 ### Training
 
 - Official: [OHF-Voice/micro-wake-word](https://github.com/OHF-Voice/micro-wake-word).
-  Their own README is blunt — training a usable model "requires experimentation"
+  Their own README is blunt: training a usable model "requires experimentation"
   and remains "very difficult".
 - Easier: [alfiedennen/microwakeword-trainer](https://github.com/alfiedennen/microwakeword-trainer),
   a Colab wrapper with the common failures patched. ~45 min on an A100.
@@ -260,15 +260,15 @@ def _resolve_pipeline(self) -> str | None:
 
 The device *does* send the wake word (`msg.wake_word_phrase`,
 `voice_assistant.cpp:356`), but HA uses it **only** for cross-satellite dedup
-(`DATA_LAST_WAKE_UP` / `DuplicateWakeUpDetectedError` in `assist_pipeline/pipeline.py`)
-— the logic that stops both ReSpeakers answering the same "hey jarvis". It never
+(`DATA_LAST_WAKE_UP` / `DuplicateWakeUpDetectedError` in `assist_pipeline/pipeline.py`),
+the logic that stops both ReSpeakers answering the same "hey jarvis". It never
 influences pipeline choice.
 
 ### How to build it anyway
 
 Requires a second wake word marked `internal: true` (see §2), then branch in
 `on_wake_word_detected`. Drive it **from the device**, not from an HA automation
-on `esphome.wake_word_detected` — that's a race you'd usually win and
+on `esphome.wake_word_detected`. That is a race you'd usually win and
 occasionally lose silently.
 
 `homeassistant.action` supports `on_success` / `on_error` (`api/__init__.py:686-688`),
@@ -306,7 +306,7 @@ which removes the race entirely:
 
 Notes:
 - Hardcode the string in the branch rather than using `wake_word` inside
-  `on_success` — the api component warns that trigger args are stored until the
+  `on_success`, because the api component warns that trigger args are stored until the
   response arrives.
 - **Set the select in both branches.** It's sticky; without the `else` you stay on
   the LLM pipeline after one alternate-wake-word turn.
@@ -447,16 +447,16 @@ Wake word model predicts 'Hey Robo Joe', but VAD model doesn't.
 The wake word *was* recognised but `vad: probability_cutoff` (currently `0.1`)
 gated it. Lower the VAD cutoff, not the model cutoff.
 
-**Build fails with `Cannot load models with different features step sizes`** —
+**Build fails with `Cannot load models with different features step sizes`**:
 a manifest has a `feature_step_size` other than 10.
 
-**Build needs internet** — `okay_nabu`, `kenobi` and `stop` are fetched from GitHub
+**Build needs internet**: `okay_nabu`, `kenobi` and `stop` are fetched from GitHub
 at compile time. Only `hey_robo_joe` is local.
 
-**Container permissions** — the ESPHome container runs as its own user; model files
+**Container permissions**: the ESPHome container runs as its own user; model files
 must be readable inside the container, not just from Unraid.
 
-**Wake word missing from HA's dropdown** — reload the ESPHome integration. Also
+**Wake word missing from HA's dropdown**: reload the ESPHome integration. Also
 check it isn't marked `internal: true`.
 
 ---
@@ -479,8 +479,8 @@ check it isn't marked `internal: true`.
 ## Reference
 
 - [formatBCE/Respeaker-Lite-ESPHome-integration](https://github.com/formatBCE/Respeaker-Lite-ESPHome-integration)
-- [OHF-Voice/micro-wake-word](https://github.com/OHF-Voice/micro-wake-word) — training framework
-- [alfiedennen/microwakeword-trainer](https://github.com/alfiedennen/microwakeword-trainer) — Colab wrapper
-- [esphome/micro-wake-word-models](https://github.com/esphome/micro-wake-word-models) — built-in models
+- [OHF-Voice/micro-wake-word](https://github.com/OHF-Voice/micro-wake-word): training framework
+- [alfiedennen/microwakeword-trainer](https://github.com/alfiedennen/microwakeword-trainer): Colab wrapper
+- [esphome/micro-wake-word-models](https://github.com/esphome/micro-wake-word-models): built-in models
 - [ESPHome micro_wake_word docs](https://esphome.io/components/micro_wake_word/)
 - [HA: Wake words for Assist](https://www.home-assistant.io/voice_control/create_wake_word/)
