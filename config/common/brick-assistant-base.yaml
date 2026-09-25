@@ -336,33 +336,46 @@ respeaker_lite:
     version: "1.1.0"
     md5: 9297155d1bf3eb21a9d4db52a89ea0c6
     # XMOS flashing runs during setup, before control_leds has anything to show,
-    # so these drive the LED directly.
+    # so these drive the LED directly -- but only once led_internal is set up
+    # (same setup priority as this component, so order is not guaranteed).
     on_begin:
-      - light.turn_on:
-          id: led_internal
-          brightness: 100%
-          red: 0%
-          green: 0%
-          blue: 100%
-          effect: "Slow Pulse"
+      - if:
+          condition:
+            lambda: return id(led_internal)->is_ready();
+          then:
+            - light.turn_on:
+                id: led_internal
+                brightness: 100%
+                red: 0%
+                green: 0%
+                blue: 100%
+                effect: "Slow Pulse"
     on_end:
-      - light.turn_on:
-          id: led_internal
-          brightness: 100%
-          red: 0%
-          green: 100%
-          blue: 0%
-          effect: "Fast Pulse"
+      - if:
+          condition:
+            lambda: return id(led_internal)->is_ready();
+          then:
+            - light.turn_on:
+                id: led_internal
+                brightness: 100%
+                red: 0%
+                green: 100%
+                blue: 0%
+                effect: "Fast Pulse"
       - delay: 3s
       - script.execute: control_leds
     on_error:
-      - light.turn_on:
-          id: led_internal
-          brightness: 100%
-          red: 100%
-          green: 0%
-          blue: 0%
-          effect: "Fast Pulse"
+      - if:
+          condition:
+            lambda: return id(led_internal)->is_ready();
+          then:
+            - light.turn_on:
+                id: led_internal
+                brightness: 100%
+                red: 100%
+                green: 0%
+                blue: 0%
+                effect: "Fast Pulse"
       - delay: 3s
       - script.execute: control_leds
 
@@ -660,6 +673,12 @@ script:
   - id: control_leds
     then:
       - lambda: |-
+          // Callers can fire during setup: LED Brightness (priority HARDWARE) restores its
+          // value before led_internal (HARDWARE - 1) has attached its effects, and starting
+          // an effect then dereferences a null state (LoadProhibited). on_boot redraws once
+          // everything is up, so skipping here loses nothing.
+          if (!id(led_internal)->is_ready()) return;
+
           id(check_if_timers_active).execute();
           if (id(is_timer_active)) {
             id(fetch_first_active_timer).execute();
