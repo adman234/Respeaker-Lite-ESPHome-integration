@@ -487,6 +487,35 @@ button:
     disabled_by_default: true
     icon: "mdi:restart"
 
+interval:
+  # Safety net for the LED. on_end normally returns the phase to idle, but it only
+  # fires when HA sends "run end". If a run finishes without one, the thinking /
+  # replying colour would stay on forever. If the assistant has been fully quiet for
+  # 3 s (not running, not announcing, no wake word being handled), reset the phase.
+  # The warning in the log shows when this path is actually taken.
+  - interval: 1s
+    then:
+      - lambda: |-
+          static uint8_t quiet_ticks = 0;
+          const int p = id(voice_assistant_phase);
+          const bool active = p == ${voice_assist_waiting_for_command_phase_id} ||
+                              p == ${voice_assist_listening_for_command_phase_id} ||
+                              p == ${voice_assist_thinking_phase_id} ||
+                              p == ${voice_assist_replying_phase_id} ||
+                              p == ${voice_assist_error_phase_id};
+          const bool quiet = !id(va).is_running() && !id(wake_pending) &&
+              id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING;
+          if (!active || !quiet) {
+            quiet_ticks = 0;
+            return;
+          }
+          if (++quiet_ticks < 3) return;
+          quiet_ticks = 0;
+          ESP_LOGW("brick", "Assistant idle but LED phase %d still set; resetting", p);
+          if (!id(timer_ringing).state) id(stop).disable();
+          id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          id(control_leds).execute();
+
 ############################
 # LED
 ############################
@@ -588,6 +617,7 @@ light:
   # Per-phase colour pickers. Colour, brightness and on/off are all honoured:
   # turning one off means "no LED during this phase". "LED Idle" doubles as a
   # night light / mood light when the assistant is doing nothing.
+  # initial_state only applies on a first flash; after that the saved HA value wins.
   - platform: rgb
     id: led_colour_idle
     name: "LED Idle"
@@ -620,8 +650,8 @@ light:
     restore_mode: RESTORE_DEFAULT_ON
     initial_state:
       brightness: 100%
-      red: 50%
-      green: 100%
+      red: 0%
+      green: 60%
       blue: 100%
     on_state:
       - script.execute: control_leds
@@ -638,9 +668,9 @@ light:
     default_transition_length: 0s
     restore_mode: RESTORE_DEFAULT_ON
     initial_state:
-      brightness: 50%
-      red: 50%
-      green: 100%
+      brightness: 80%
+      red: 70%
+      green: 0%
       blue: 100%
     on_state:
       - script.execute: control_leds
@@ -657,7 +687,7 @@ light:
     default_transition_length: 0s
     restore_mode: RESTORE_DEFAULT_ON
     initial_state:
-      brightness: 50%
+      brightness: 80%
       red: 0%
       green: 100%
       blue: 0%
@@ -686,8 +716,12 @@ script:
 
           float master = id(led_brightness).state / 100.0f;
           if (std::isnan(master)) master = 0.6f;
+          // Sliders are perceptual: the LED output is linear (gamma_correct 1.0), and a
+          // WS2812 at 30% linear already looks nearly full. Squaring makes 50% look like
+          // roughly half.
+          auto perceptual = [](float x) { return x * x; };
           // Floor for states that must stay visible even when the slider is low.
-          const float alert = std::max(master, 0.2f);
+          const float alert = perceptual(std::max(master, 0.35f));
 
           auto off = []() {
             id(led_internal).turn_off().set_transition_length(0).perform();
@@ -703,7 +737,7 @@ script:
           auto show_from = [&](light::LightState *src, const char *effect) {
             const auto &v = src->remote_values;
             if (!v.is_on()) { off(); return; }
-            show(v.get_red(), v.get_green(), v.get_blue(), master * v.get_brightness(), effect);
+            show(v.get_red(), v.get_green(), v.get_blue(), perceptual(master * v.get_brightness()), effect);
           };
 
           const int phase = id(voice_assistant_phase);

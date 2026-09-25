@@ -353,7 +353,13 @@ One script, `control_leds`, owns the LED. Everything else updates state (the
   colour wheel, brightness and on/off per phase. Brightness multiplies with the
   master. Off = LED stays dark in that phase. These drive no hardware; they're
   colour pickers backed by a do-nothing template output.
-- Alerts (1–6, 10–12) use fixed colours at `max(master, 20 %)` so they stay visible.
+- Output brightness is `(master × phase brightness)²`, so the sliders feel linear to
+  the eye (the LED itself runs with `gamma_correct: 1.0`).
+- Alerts (1–6, 10–12) use fixed colours at `max(master, 35 %)²` so they stay visible.
+- Default colours (first flash only; saved HA values win afterwards): Listening sky
+  blue, Thinking purple, Replying green, Idle off.
+- A 1 s watchdog resets a stuck phase to idle if the assistant has been quiet for 3 s
+  (logs `Assistant idle but LED phase N still set`).
 
 The old **LED Light** entity is gone; HA will show it as unavailable, so delete it.
 
