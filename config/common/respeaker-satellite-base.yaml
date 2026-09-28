@@ -135,11 +135,6 @@ api:
     - script.execute: control_leds
   encryption:
 
-ota:
-  - platform: esphome
-    id: ota_esphome
-    password: !secret ota_password
-
 i2c:
   - id: internal_i2c
     sda: GPIO5
@@ -577,7 +572,7 @@ light:
   - platform: esp32_rmt_led_strip
     id: led_internal
     internal: true
-    rgb_order: GRB
+    channel_colors: GRB
     pin: GPIO1
     num_leds: 1
     rmt_symbols: 192
