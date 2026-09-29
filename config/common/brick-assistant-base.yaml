@@ -41,7 +41,7 @@ esphome:
   name_add_mac_suffix: false
   project:
     name: diycraic.brick_assistant
-    version: 2026.09.22
+    version: 2026.09.29
   min_version: 2026.6.0
   platformio_options:
     board_build.flash_mode: dio
