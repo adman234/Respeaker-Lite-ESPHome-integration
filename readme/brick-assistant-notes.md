@@ -244,14 +244,19 @@ Two ways to change it:
   device file, as the stock models in the base already do.
 - **Live, from Home Assistant**: the `number.<device>_custom_wake_word_cutoff` slider
   (50 to 99%). `apply_custom_wake_word_cutoff` pushes it into every model returned by
-  `id(mww).get_wake_words()` whose id is not one of the three the select manages.
+  `id(mww).get_wake_words()` whose id is not one the package already calibrates.
   `get_wake_words()` already excludes internal-only models, so the `stop` word keeps its
   own 0.4 and barge-in is unaffected.
 
+`kenobi` is skipped as well, because this package sets its cutoff to 0.7 explicitly. It was the
+first model the seeding loop met on the original version, so a fresh flash adopted 0.7 and made
+every custom wake word far more trigger-happy. Seeding now takes the **strictest** manifest
+default among the models the slider governs, so it can never loosen a device on its own.
+
 Cutoffs are quantized `uint8`, so the slider converts: `cutoff = round(percent * 255 / 100)`
-(97% -> 247). On first boot the slider has no stored value, so the script seeds it from the
-first custom model's `get_default_probability_cutoff()`, meaning a flash never silently
-changes detection. The script runs from `on_boot` priority -100, after micro_wake_word setup.
+(97% -> 247). The `custom_cutoff_seeded` global marks whether seeding has happened: ESPHome always
+gives a template number an `initial_value`, so "never set" is otherwise indistinguishable from a
+user choosing the minimum. The script runs from `on_boot` priority -100, after micro_wake_word setup.
 
 Raising the cutoff trades misses for quiet: each step up cuts false accepts and makes the
 speaker a little deafer, so change it while the TV is on and check it still hears you.

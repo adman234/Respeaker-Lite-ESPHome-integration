@@ -740,17 +740,21 @@ script:
     then:
       - lambda: |-
           auto select_managed = [](const std::string &model_id) {
-            return model_id == "okay_nabu" || model_id == "hey_jarvis" || model_id == "hey_mycroft";
+            return model_id == "okay_nabu" || model_id == "hey_jarvis" || model_id == "hey_mycroft" ||
+                   model_id == "kenobi";
           };
           if (!id(custom_cutoff_seeded)) {
+            float seed = NAN;
             for (auto *model : id(mww).get_wake_words()) {
               if (select_managed(model->get_id())) continue;
-              id(custom_cutoff_seeded) = true;
-              auto call = id(custom_wake_word_cutoff).make_call();
-              call.set_value(roundf(model->get_default_probability_cutoff() * 100.0f / 255.0f));
-              call.perform();
-              return;
+              const float manifest = roundf(model->get_default_probability_cutoff() * 100.0f / 255.0f);
+              if (isnan(seed) || manifest > seed) seed = manifest;
             }
+            if (isnan(seed)) return;
+            id(custom_cutoff_seeded) = true;
+            auto call = id(custom_wake_word_cutoff).make_call();
+            call.set_value(seed);
+            call.perform();
             return;
           }
           const float percent = id(custom_wake_word_cutoff).state;
