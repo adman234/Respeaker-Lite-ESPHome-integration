@@ -230,6 +230,32 @@ subfolders), but it is ESPHome scratch space. **Recommended: move to a neutral
 folder** such as `/mnt/user/appdata/esphome-data/custom_wake_words/robo-joe/`
 (container `/data/custom_wake_words/robo-joe/`) and update the one `model:` line.
 
+### The sensitivity select ignores custom models
+
+`select.<device>_wake_word_sensitivity` only calls `set_probability_cutoff()` on
+`okay_nabu`, `hey_jarvis` and `hey_mycroft`, with values measured per model against the
+Dinner Party Corpus. A custom model added by a device file keeps whatever
+`probability_cutoff` its manifest carries, no matter what the select says. That is easy to
+miss when a custom wake word fires at the TV and turning sensitivity down changes nothing.
+
+Two ways to change it:
+
+- **Fixed, at build time**: add `probability_cutoff: 0.97` beside the `model:` line in the
+  device file, as the stock models in the base already do.
+- **Live, from Home Assistant**: the `number.<device>_custom_wake_word_cutoff` slider
+  (50 to 99%). `apply_custom_wake_word_cutoff` pushes it into every model returned by
+  `id(mww).get_wake_words()` whose id is not one of the three the select manages.
+  `get_wake_words()` already excludes internal-only models, so the `stop` word keeps its
+  own 0.4 and barge-in is unaffected.
+
+Cutoffs are quantized `uint8`, so the slider converts: `cutoff = round(percent * 255 / 100)`
+(97% -> 247). On first boot the slider has no stored value, so the script seeds it from the
+first custom model's `get_default_probability_cutoff()`, meaning a flash never silently
+changes detection. The script runs from `on_boot` priority -100, after micro_wake_word setup.
+
+Raising the cutoff trades misses for quiet: each step up cuts false accepts and makes the
+speaker a little deafer, so change it while the TV is on and check it still hears you.
+
 ### Training
 
 - Official: [OHF-Voice/micro-wake-word](https://github.com/OHF-Voice/micro-wake-word).
@@ -237,6 +263,9 @@ folder** such as `/mnt/user/appdata/esphome-data/custom_wake_words/robo-joe/`
   and remains "very difficult".
 - Easier: [alfiedennen/microwakeword-trainer](https://github.com/alfiedennen/microwakeword-trainer),
   a Colab wrapper with the common failures patched. ~45 min on an A100.
+- Self-hosted: [adman234/openwakeword-trainer](https://github.com/adman234/openwakeword-trainer),
+  a container with a web UI. Records your voice in the browser, trains both an ESPHome
+  microWakeWord model and a Home Assistant openWakeWord one, and writes the manifest.
 - Pick a phrase of **3–4 syllables** that isn't common in conversation.
 
 ---

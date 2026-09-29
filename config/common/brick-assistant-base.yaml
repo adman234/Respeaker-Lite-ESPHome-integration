@@ -61,6 +61,11 @@ esphome:
             then:
               - lambda: id(init_in_progress) = false;
               - script.execute: control_leds
+    - priority: -100
+      then:
+        # micro_wake_word has finished setup by now, so the stored slider value can be pushed
+        # into the custom models.
+        - script.execute: apply_custom_wake_word_cutoff
   on_shutdown:
     then:
       # Prevent loud noise on software restart
@@ -383,6 +388,13 @@ respeaker_lite:
 # STATE
 ############################
 globals:
+  # False until the custom wake word cutoff slider has been seeded from the model's own manifest
+  # value. ESPHome always gives a template number an initial_value, so without this a fresh flash
+  # would push min_value into the model instead of leaving its detection threshold alone.
+  - id: custom_cutoff_seeded
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
   # True until Home Assistant first connects (or 10 minutes pass). Drives the boot animation.
   - id: init_in_progress
     type: bool
@@ -537,6 +549,25 @@ number:
     initial_value: 60
     on_value:
       - script.execute: control_leds
+
+  # Detection threshold for the wake words the sensitivity select does not calibrate: kenobi and
+  # any custom model a device file adds. Raise it when something on TV keeps waking the speaker,
+  # lower it when it misses you. Takes effect immediately, no reflash.
+  - platform: template
+    id: custom_wake_word_cutoff
+    name: "Custom wake word cutoff"
+    icon: mdi:tune-variant
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 50
+    max_value: 99
+    step: 1
+    mode: slider
+    optimistic: true
+    restore_value: true
+    initial_value: 90
+    on_value:
+      - script.execute: apply_custom_wake_word_cutoff
 
 output:
   # Sink for the colour-picker lights below. They exist only to give Home Assistant a
@@ -698,6 +729,38 @@ light:
 # SCRIPTS
 ############################
 script:
+
+  # Applies the "Custom wake word cutoff" slider to every wake word model the sensitivity select
+  # leaves alone. That select calibrates okay_nabu, hey_jarvis and hey_mycroft with per-model
+  # values, so those are skipped here. get_wake_words() already excludes the internal stop model.
+  # On the very first boot the slider has no value yet, so it is seeded from the model's own
+  # manifest cutoff and nothing changes silently.
+  - id: apply_custom_wake_word_cutoff
+    mode: restart
+    then:
+      - lambda: |-
+          auto select_managed = [](const std::string &model_id) {
+            return model_id == "okay_nabu" || model_id == "hey_jarvis" || model_id == "hey_mycroft";
+          };
+          if (!id(custom_cutoff_seeded)) {
+            for (auto *model : id(mww).get_wake_words()) {
+              if (select_managed(model->get_id())) continue;
+              id(custom_cutoff_seeded) = true;
+              auto call = id(custom_wake_word_cutoff).make_call();
+              call.set_value(roundf(model->get_default_probability_cutoff() * 100.0f / 255.0f));
+              call.perform();
+              return;
+            }
+            return;
+          }
+          const float percent = id(custom_wake_word_cutoff).state;
+          if (isnan(percent)) return;
+          const uint8_t cutoff = (uint8_t) lroundf(percent * 255.0f / 100.0f);
+          for (auto *model : id(mww).get_wake_words()) {
+            if (select_managed(model->get_id())) continue;
+            model->set_probability_cutoff(cutoff);
+            ESP_LOGI("mww", "%s probability cutoff set to %.0f%% (%u)", model->get_id().c_str(), percent, cutoff);
+          }
   # Single owner of the LED. A priority chain: the first matching state wins.
   # Call it whenever anything it reads changes.
   - id: control_leds
