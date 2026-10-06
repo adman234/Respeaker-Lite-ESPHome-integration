@@ -41,7 +41,7 @@ esphome:
   name_add_mac_suffix: false
   project:
     name: diycraic.brick_assistant
-    version: 2026.09.29
+    version: 2026.10.06
   min_version: 2026.6.0
   platformio_options:
     board_build.flash_mode: dio
@@ -410,6 +410,12 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # Effect currently requested from the LED ("off", "None" = solid, or an effect name).
+  # Only for the Assistant status diagnostic.
+  - id: led_shown
+    type: std::string
+    restore_value: no
+    initial_value: '"off"'
   # Short-lived LED feedback (see led_feedback_* substitutions)
   - id: led_feedback
     type: int
@@ -490,6 +496,18 @@ text_sensor:
     name: "Next timer name"
     icon: "mdi:timer"
     disabled_by_default: true
+  # What the LED logic currently believes, e.g. "replying run ann led=Breathe".
+  #   run  = voice assistant state machine is not idle
+  #   ann  = an announcement (TTS reply, chime) is playing
+  #   wake = a wake word is being handled (chime gap)
+  # Home Assistant records every change, so when the LED misbehaves the history of
+  # this entity shows exactly which state it was stuck in, and any watchdog reset.
+  - platform: template
+    id: assistant_status
+    name: "Assistant status"
+    icon: mdi:state-machine
+    entity_category: diagnostic
+    update_interval: never
 
 button:
   - platform: restart
@@ -500,33 +518,116 @@ button:
     icon: "mdi:restart"
 
 interval:
-  # Safety net for the LED. on_end normally returns the phase to idle, but it only
-  # fires when HA sends "run end". If a run finishes without one, the thinking /
-  # replying colour would stay on forever. If the assistant has been fully quiet for
-  # 3 s (not running, not announcing, no wake word being handled), reset the phase.
-  # The warning in the log shows when this path is actually taken.
+  # LED supervisor, once a second. Three jobs:
+  #
+  # 1. Watchdog. on_end normally returns the phase to idle, but it depends on events
+  #    from Home Assistant and on the voice assistant reaching its idle state. Reset
+  #    the phase when:
+  #      - the assistant has been fully quiet for 3 s (not running, not announcing,
+  #        no wake word being handled) while a phase is still set;
+  #      - the phase is "replying" but nothing has been playing for 10 s. This covers
+  #        the assistant's state machine staying non-idle after the audio ended, which
+  #        the first rule cannot see;
+  #      - any single phase has lasted 3 minutes.
+  #    wake_pending is also cleared if it has been set for 10 s.
+  # 2. Reconcile. Re-run control_leds so a lost LED frame or a missed call heals
+  #    itself within a second instead of leaving a stale colour on the pixel.
+  # 3. Publish "Assistant status" when it changes (see text_sensor).
   - interval: 1s
     then:
       - lambda: |-
           static uint8_t quiet_ticks = 0;
+          static uint8_t silent_reply_ticks = 0;
+          static uint8_t wake_ticks = 0;
+          static uint16_t phase_ticks = 0;
+          static int last_phase = -1;
+          static std::string last_status;
+
           const int p = id(voice_assistant_phase);
+          const bool running = id(va).is_running();
+          const bool announcing =
+              id(external_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING;
           const bool active = p == ${voice_assist_waiting_for_command_phase_id} ||
                               p == ${voice_assist_listening_for_command_phase_id} ||
                               p == ${voice_assist_thinking_phase_id} ||
                               p == ${voice_assist_replying_phase_id} ||
                               p == ${voice_assist_error_phase_id};
-          const bool quiet = !id(va).is_running() && !id(wake_pending) &&
-              id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING;
-          if (!active || !quiet) {
-            quiet_ticks = 0;
-            return;
+
+          auto phase_name = [](int phase) -> const char * {
+            switch (phase) {
+              case ${voice_assist_idle_phase_id}: return "idle";
+              case ${voice_assist_waiting_for_command_phase_id}: return "waiting";
+              case ${voice_assist_listening_for_command_phase_id}: return "listening";
+              case ${voice_assist_thinking_phase_id}: return "thinking";
+              case ${voice_assist_replying_phase_id}: return "replying";
+              case ${voice_assist_not_ready_phase_id}: return "not_ready";
+              case ${voice_assist_error_phase_id}: return "error";
+              default: return "unknown";
+            }
+          };
+          auto describe = [&](int phase) {
+            std::string s = phase_name(phase);
+            if (running) s += " run";
+            if (announcing) s += " ann";
+            if (id(wake_pending)) s += " wake";
+            return s;
+          };
+
+          if (id(wake_pending)) {
+            if (++wake_ticks >= 10) {
+              ESP_LOGW("brick", "wake_pending set for 10 s; clearing");
+              id(wake_pending) = false;
+              wake_ticks = 0;
+            }
+          } else {
+            wake_ticks = 0;
           }
-          if (++quiet_ticks < 3) return;
-          quiet_ticks = 0;
-          ESP_LOGW("brick", "Assistant idle but LED phase %d still set; resetting", p);
-          if (!id(timer_ringing).state) id(stop).disable();
-          id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+
+          if (p != last_phase) {
+            last_phase = p;
+            phase_ticks = 0;
+          } else if (phase_ticks < 60000) {
+            phase_ticks++;
+          }
+
+          const char *why = nullptr;
+          if (active) {
+            const bool quiet = !running && !id(wake_pending) && !announcing;
+            quiet_ticks = quiet ? quiet_ticks + 1 : 0;
+            const bool silent_reply = p == ${voice_assist_replying_phase_id} && !announcing;
+            silent_reply_ticks = silent_reply ? silent_reply_ticks + 1 : 0;
+            if (quiet_ticks >= 3) {
+              why = "assistant idle";
+            } else if (silent_reply_ticks >= 10) {
+              why = "replying but nothing playing";
+            } else if (phase_ticks >= 180) {
+              why = "phase timeout";
+            }
+          } else {
+            quiet_ticks = 0;
+            silent_reply_ticks = 0;
+          }
+
+          if (why != nullptr) {
+            const std::string was = describe(p);
+            ESP_LOGW("brick", "LED watchdog reset (%s), was: %s", why, was.c_str());
+            last_status = std::string("watchdog reset (") + why + "), was: " + was;
+            id(assistant_status).publish_state(last_status);
+            quiet_ticks = 0;
+            silent_reply_ticks = 0;
+            if (!id(timer_ringing).state) id(stop).disable();
+            id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          }
+
           id(control_leds).execute();
+
+          if (why == nullptr) {
+            const std::string status = describe(id(voice_assistant_phase)) + " led=" + id(led_shown);
+            if (status != last_status) {
+              last_status = status;
+              id(assistant_status).publish_state(status);
+            }
+          }
 
 ############################
 # LED
@@ -791,9 +892,11 @@ script:
           const float alert = perceptual(std::max(master, 0.35f));
 
           auto off = []() {
+            id(led_shown) = "off";
             id(led_internal).turn_off().set_transition_length(0).perform();
           };
           auto show = [](float r, float g, float b, float brightness, const char *effect) {
+            id(led_shown) = effect;
             auto call = id(led_internal).turn_on();
             call.set_rgb(r, g, b);
             call.set_brightness(std::min(std::max(brightness, 0.01f), 1.0f));

@@ -392,8 +392,17 @@ One script, `control_leds`, owns the LED. Everything else updates state (the
 - Alerts (1–6, 10–12) use fixed colours at `max(master, 35 %)²` so they stay visible.
 - Default colours (first flash only; saved HA values win afterwards): Listening sky
   blue, Thinking purple, Replying green, Idle off.
-- A 1 s watchdog resets a stuck phase to idle if the assistant has been quiet for 3 s
-  (logs `Assistant idle but LED phase N still set`).
+- A 1 s LED supervisor (`interval:`) does three things:
+  - **Watchdog**: resets the phase to idle when the assistant has been fully quiet for
+    3 s, when the phase is "replying" but nothing has played for 10 s (covers the voice
+    assistant state machine staying non-idle after the audio ended), or when one phase
+    has lasted 3 minutes. Also clears a `wake_pending` flag older than 10 s.
+  - **Reconcile**: re-runs `control_leds`, so a lost LED frame or a missed call heals
+    within a second.
+  - **Assistant status** (diagnostic text sensor): e.g. `replying run ann led=Breathe`
+    (`run` = assistant not idle, `ann` = announcement playing, `wake` = wake word being
+    handled). A watchdog reset publishes `watchdog reset (<reason>), was: <state>`.
+    HA records every change, so its history shows what the LED logic was stuck on.
 
 The old **LED Light** entity is gone; HA will show it as unavailable, so delete it.
 
