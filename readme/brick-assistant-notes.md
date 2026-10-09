@@ -508,6 +508,34 @@ must be readable inside the container, not just from Unraid.
 **Wake word missing from HA's dropdown**: reload the ESPHome integration. Also
 check it isn't marked `internal: true`.
 
+### Running the wake word in Home Assistant (openWakeWord)
+
+The **Wake word engine location** select (config entity) switches between:
+
+- **On device** (default): microWakeWord on the ESP32, exactly as before.
+- **In Home Assistant**: `set_use_wake_word(true)` + `voice_assistant.start_continuous`.
+  The device streams the mic to HA all the time and the Assist pipeline's wake word
+  engine (e.g. openWakeWord, set via **⋮ → Add streaming wake word processing** in the
+  pipeline) decides. HA's `assist_pipeline: debug_recording_dir` then also records
+  the wake word audio.
+
+In HA mode:
+
+- mWW keeps running. The internal `stop` model works as before (it ends the
+  continuous stream, and `start_ha_wake_word` resumes it). The selected on-device
+  model runs as a **shadow**: a detection only logs
+  `Shadow on-device wake word (ignored, ...)` at WARN, so you can compare engines on
+  the same audio.
+- `voice_assistant.is_running` stays true between turns, so `on_end` is skipped and
+  `on_idle` (fires when a turn is fully over, before streaming resumes) un-ducks,
+  disarms `stop` and resets the LED. The watchdog's "assistant idle" rule can't fire;
+  the "replying but nothing playing" and 3-minute rules still do.
+- Ducking happens on `voice_assistant: on_wake_word_detected` (HA detection), not
+  `on_start`, which in this mode fires when a run starts waiting for the wake word.
+- No wake word barge-in during a reply: in continuous mode the mic stops while the
+  reply plays. Saying "stop" still works.
+- The `start_va` API action does nothing while streaming.
+
 ---
 
 ## 8. Open items

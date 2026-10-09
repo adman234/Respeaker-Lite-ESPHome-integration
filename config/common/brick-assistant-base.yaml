@@ -66,6 +66,12 @@ esphome:
         # micro_wake_word has finished setup by now, so the stored slider value can be pushed
         # into the custom models.
         - script.execute: apply_custom_wake_word_cutoff
+        # Re-sync the wake word engine from the restored select, in case its on_value ran
+        # before voice_assistant was set up.
+        - lambda: |-
+            auto idx = id(wake_word_engine_location).active_index();
+            id(ha_wake_word) = idx.has_value() && *idx == 1;
+            id(va).set_use_wake_word(id(ha_wake_word));
   on_shutdown:
     then:
       # Prevent loud noise on software restart
@@ -410,6 +416,12 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # Mirrors the "Wake word engine location" select: true = Home Assistant runs the wake
+  # word (e.g. openWakeWord) on audio streamed continuously from this device.
+  - id: ha_wake_word
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   # Effect currently requested from the LED ("off", "None" = solid, or an effect name).
   # Only for the Assistant status diagnostic.
   - id: led_shown
@@ -475,6 +487,31 @@ select:
           id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
           id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
         }
+  # Where the wake word runs. "In Home Assistant" streams the mic to HA all the time and
+  # uses the wake word engine set in the Assist pipeline (e.g. openWakeWord). The on-device
+  # "stop" model keeps working in both modes.
+  - platform: template
+    name: "Wake word engine location"
+    id: wake_word_engine_location
+    optimistic: true
+    initial_option: On device
+    restore_value: true
+    entity_category: config
+    options:
+      - On device
+      - In Home Assistant
+    on_value:
+      - lambda: |-
+          id(ha_wake_word) = (x == "In Home Assistant");
+          id(va).set_use_wake_word(id(ha_wake_word));
+      - if:
+          condition:
+            lambda: return id(ha_wake_word);
+          then:
+            - script.execute: start_ha_wake_word
+          else:
+            # Ends continuous streaming; the on-device model takes over again.
+            - voice_assistant.stop:
   - platform: logger
     id: logger_select
     name: Logger Level
@@ -1044,6 +1081,50 @@ script:
             id(next_timer_name).publish_state("-");
           }
 
+  # Starts (or resumes) continuous streaming to Home Assistant's wake word engine.
+  # No-op unless the engine location is "In Home Assistant" and HA is connected.
+  - id: start_ha_wake_word
+    mode: restart
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: return id(ha_wake_word);
+              - api.connected:
+          then:
+            # A stop request needs a few loops to reach idle; start is ignored until then.
+            - wait_until:
+                timeout: 3s
+                condition:
+                  not:
+                    voice_assistant.is_running:
+            # Nothing is running now, so any turn (e.g. one ended by "stop") is over.
+            - script.execute: ha_turn_over
+            - lambda: id(va).set_wake_word("");
+            - voice_assistant.start_continuous:
+
+  # HA mode: a turn is over. Un-duck, disarm "stop" and return the LED to idle.
+  - id: ha_turn_over
+    mode: restart
+    then:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      # Leave the error animation up for a moment
+      - if:
+          condition:
+            lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+          then:
+            - delay: 1s
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - micro_wake_word.disable_model: stop
+      - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+      - script.execute: control_leds
+
   - id: send_wake_word_event
     parameters:
       wake_word: string
@@ -1441,73 +1522,87 @@ micro_wake_word:
   vad:
     probability_cutoff: 0.1
   on_wake_word_detected:
-    - logger.log:
-        format: "Wake word was: %s"
-        args: [ 'wake_word.c_str()' ]
-    - script.execute:
-        id: send_wake_word_event
-        wake_word: !lambda return wake_word;
+    # With the engine set to "In Home Assistant", only the internal "stop" model acts here.
+    # The selected on-device model keeps running as a shadow and only logs, so the two
+    # engines can be compared on the same audio.
     - if:
         condition:
-          voice_assistant.is_running:
+          lambda: return id(ha_wake_word) && wake_word != "Stop";
         then:
-          - voice_assistant.stop:
-    - if:
-        condition:
-          switch.is_on: timer_ringing
-        then:
-          - switch.turn_off: timer_ringing
-    - if:
-        condition:
-          media_player.is_announcing:
-            id: external_media_player
-        then:
-          - media_player.stop:
-              id: external_media_player
-              announcement: true
-    - if:
-        condition:
-          lambda: return wake_word != "Stop";
-        then:
+          - logger.log:
+              level: WARN
+              format: "Shadow on-device wake word (ignored, engine is In Home Assistant): %s"
+              args: [ 'wake_word.c_str()' ]
+        else:
+          - logger.log:
+              format: "Wake word was: %s"
+              args: [ 'wake_word.c_str()' ]
+          - script.execute:
+              id: send_wake_word_event
+              wake_word: !lambda return wake_word;
           - if:
               condition:
-                lambda: return id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id};
+                voice_assistant.is_running:
               then:
-                - lambda: |-
-                    id(wake_pending) = true;
-                    id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
-                - script.execute: control_leds
+                - voice_assistant.stop:
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+          - if:
+              condition:
+                media_player.is_announcing:
+                  id: external_media_player
+              then:
+                - media_player.stop:
+                    id: external_media_player
+                    announcement: true
+          - if:
+              condition:
+                lambda: return wake_word != "Stop";
+              then:
                 - if:
                     condition:
-                      switch.is_on: wake_sound
+                      lambda: return id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id};
                     then:
+                      - lambda: |-
+                          id(wake_pending) = true;
+                          id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+                      - script.execute: control_leds
+                      - if:
+                          condition:
+                            switch.is_on: wake_sound
+                          then:
+                            - script.execute:
+                                id: play_sound
+                                priority: true
+                                sound_file: "wake_word_triggered_sound"
+                            - delay: 300ms
+                            - wait_until:
+                                timeout: 3s
+                                condition:
+                                  not:
+                                    media_player.is_announcing:
+                                      id: external_media_player
+                      - voice_assistant.start:
+                          wake_word: !lambda return wake_word;
+                          silence_detection: true
+                      - lambda: id(wake_pending) = false;
+                    else:
+                      - delay: 1s
                       - script.execute:
                           id: play_sound
                           priority: true
-                          sound_file: "wake_word_triggered_sound"
-                      - delay: 300ms
-                      - wait_until:
-                          timeout: 3s
-                          condition:
-                            not:
-                              media_player.is_announcing:
-                                id: external_media_player
-                - voice_assistant.start:
-                    wake_word: !lambda return wake_word;
-                    silence_detection: true
-                - lambda: id(wake_pending) = false;
+                          sound_file: "connection_problem_sound"
               else:
-                - delay: 1s
+                - logger.log: "Stop wake word was used!"
                 - script.execute:
-                    id: play_sound
-                    priority: true
-                    sound_file: "connection_problem_sound"
-        else:
-          - logger.log: "Stop wake word was used!"
-          - script.execute:
-              id: led_feedback_flash
-              kind: ${led_feedback_stop_word}
-              duration_ms: 300
+                    id: led_feedback_flash
+                    kind: ${led_feedback_stop_word}
+                    duration_ms: 300
+          # "stop" ended the continuous stream; resume it (no-op when on device)
+          - script.execute: start_ha_wake_word
 
 ############################
 # VOICE ASSISTANT
@@ -1528,8 +1623,10 @@ voice_assistant:
     - lambda: |-
         id(init_in_progress) = false;
         id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    # Runs in both modes: in HA mode it still provides the "stop" word.
     - micro_wake_word.start:
     - script.execute: control_leds
+    - script.execute: start_ha_wake_word
 
   on_client_disconnected:
     - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
@@ -1557,10 +1654,52 @@ voice_assistant:
 
   on_start:
     - logger.log: "VA: on_start"
+    # In HA mode every run starts by waiting for the wake word, so duck on detection instead.
+    - if:
+        condition:
+          lambda: return !id(ha_wake_word);
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 30  # Number of dB quieter; higher implies more quiet, 0 implies full volume
+              duration: 0.0s
+
+  # Only fires when Home Assistant detected the wake word (engine location "In Home Assistant").
+  # STT is already running, so the chime is not waited for (the XMOS AEC removes it).
+  on_wake_word_detected:
+    - logger.log: "VA: wake word detected by Home Assistant"
     - mixer_speaker.apply_ducking:
         id: media_mixing_input
-        decibel_reduction: 30  # Number of dB quieter; higher implies more quiet, 0 implies full volume
+        decibel_reduction: 30
         duration: 0.0s
+    - if:
+        condition:
+          switch.is_on: timer_ringing
+        then:
+          - switch.turn_off: timer_ringing
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
+    - script.execute:
+        id: send_wake_word_event
+        wake_word: "Home Assistant"
+    - if:
+        condition:
+          switch.is_on: wake_sound
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "wake_word_triggered_sound"
+
+  # Continuous (HA) mode only: fires each time a turn is fully over (reply played, or the run
+  # ended/errored) just before streaming for the next wake word resumes. Does the job that
+  # on_end does in on-device mode.
+  on_idle:
+    - if:
+        condition:
+          lambda: return id(ha_wake_word);
+        then:
+          - script.execute: ha_turn_over
 
   on_listening:
     - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
@@ -1604,44 +1743,50 @@ voice_assistant:
         tts_uri: !lambda 'return x;'
 
   on_end:
-    - wait_until:
-        not:
-          voice_assistant.is_running
-    - logger.log: "VA: on_end"
-    - mixer_speaker.apply_ducking:
-        id: media_mixing_input
-        decibel_reduction: 0
-        duration: 1.0s
-    # Leave the error animation up for a moment
+    # In HA mode is_running stays true between turns (continuous streaming), so the wait
+    # below would never finish; on_idle does this job there.
     - if:
         condition:
-          lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+          lambda: return !id(ha_wake_word);
         then:
-          - delay: 1s
-    # With streaming TTS, on_end fires when the stream ends, not when the audio buffer
-    # drains. Keep the "stop" word armed and the replying LED on until playback ends.
-    - wait_until:
-        timeout: 60s
-        condition:
-          not:
-            media_player.is_announcing:
-              id: external_media_player
-    # A barge-in may have started a new turn meanwhile (or be in its chime gap):
-    # leave that turn's model and LED alone.
-    - if:
-        condition:
-          and:
-            - not:
-                voice_assistant.is_running:
-            - lambda: return !id(wake_pending);
-        then:
+          - wait_until:
+              not:
+                voice_assistant.is_running
+          - logger.log: "VA: on_end"
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+          # Leave the error animation up for a moment
           - if:
               condition:
-                switch.is_off: timer_ringing
+                lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
               then:
-                - micro_wake_word.disable_model: stop
-          - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
-          - script.execute: control_leds
+                - delay: 1s
+          # With streaming TTS, on_end fires when the stream ends, not when the audio buffer
+          # drains. Keep the "stop" word armed and the replying LED on until playback ends.
+          - wait_until:
+              timeout: 60s
+              condition:
+                not:
+                  media_player.is_announcing:
+                    id: external_media_player
+          # A barge-in may have started a new turn meanwhile (or be in its chime gap):
+          # leave that turn's model and LED alone.
+          - if:
+              condition:
+                and:
+                  - not:
+                      voice_assistant.is_running:
+                  - lambda: return !id(wake_pending);
+              then:
+                - if:
+                    condition:
+                      switch.is_off: timer_ringing
+                    then:
+                      - micro_wake_word.disable_model: stop
+                - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+                - script.execute: control_leds
 
   on_timer_finished:
     - switch.turn_on: timer_ringing
