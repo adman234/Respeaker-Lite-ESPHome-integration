@@ -31,6 +31,12 @@ substitutions:
   led_feedback_volume_limit: '1'
   led_feedback_stop_word: '2'
 
+  # "Disconnected" indicator (Wi-Fi or Home Assistant unreachable). Home Assistant is
+  # routinely down for ~15-20 min during the nightly Unraid appdata backup, so the red
+  # pulse waits this long before appearing, and is deliberately very dim.
+  offline_led_delay_ms: '1800000'   # 30 minutes
+  offline_led_brightness: '0.04'    # peak, linear (4% is "night light" dim)
+
   # Sounds
   brick_sounds_url: https://github.com/Stepyon/Respeaker-Lite-ESPHome-BrickAssistant/raw/refs/heads/BrickAssistant/sounds
   error_cloud_expired_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
@@ -41,7 +47,7 @@ esphome:
   name_add_mac_suffix: false
   project:
     name: diycraic.brick_assistant
-    version: 2026.10.06
+    version: 2026.10.12
   min_version: 2026.6.0
   platformio_options:
     board_build.flash_mode: dio
@@ -117,6 +123,11 @@ logger:
 
 api:
   id: api_id
+  # ESPHome reboots the device after this long without an API client (default 15 min).
+  # That is shorter than the nightly Home Assistant backup window, so the speakers used
+  # to reboot mid-backup. 60 min outlasts it and still recovers a speaker whose API has
+  # genuinely hung.
+  reboot_timeout: 60min
   actions:
     - action: start_va
       then:
@@ -422,6 +433,12 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # millis() when Wi-Fi or Home Assistant was first seen unreachable; 0 while connected.
+  # Read and maintained only by control_leds (it runs at least once a second).
+  - id: offline_since
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   # Effect currently requested from the LED ("off", "None" = solid, or an effect name).
   # Only for the Assistant status diagnostic.
   - id: led_shown
@@ -949,10 +966,23 @@ script:
 
           const int phase = id(voice_assistant_phase);
 
+          // Track how long we have been unreachable (Wi-Fi down, or no Home Assistant).
+          const bool online = id(wifi_id).is_connected() && id(api_id).is_connected();
+          const uint32_t now_ms = millis();
+          if (online) {
+            id(offline_since) = 0;
+          } else if (id(offline_since) == 0) {
+            id(offline_since) = now_ms == 0 ? 1 : now_ms;
+          }
+          const bool offline_long =
+              !online && (uint32_t)(now_ms - id(offline_since)) >= (uint32_t) ${offline_led_delay_ms};
+
           if (id(init_in_progress)) {
             show(0.09f, 0.73f, 0.95f, alert, id(wifi_id).is_connected() ? "Fast Pulse" : "Slow Pulse");
-          } else if (!id(wifi_id).is_connected() || !id(api_id).is_connected()) {
-            show(1.0f, 0.0f, 0.0f, alert, "Slow Pulse");
+          } else if (offline_long) {
+            // Unreachable for a long time, so something is genuinely wrong. Very dim on
+            // purpose: this can happen at night in a bedroom.
+            show(1.0f, 0.0f, 0.0f, ${offline_led_brightness}, "Slow Pulse");
           } else if (id(siren_on)) {
             show(1.0f, 0.0f, 0.0f, 1.0f, "Fast Pulse");
           } else if (id(timer_ringing).state) {
@@ -972,8 +1002,9 @@ script:
             show_from(id(led_colour_replying), "Breathe");
           } else if (phase == ${voice_assist_error_phase_id}) {
             show(1.0f, 0.0f, 0.0f, alert, "Fast Pulse");
-          } else if (phase == ${voice_assist_not_ready_phase_id}) {
-            // Connected to HA, but no Assist pipeline is attached to this device.
+          } else if (phase == ${voice_assist_not_ready_phase_id} && online) {
+            // Connected to HA, but no Assist pipeline is attached to this device. (While
+            // offline the phase is also not_ready; that falls through to idle below.)
             show(1.0f, 0.5f, 0.0f, alert, "Slow Pulse");
           } else if (id(is_timer_active)) {
             show(1.0f, 1.0f, 0.0f, alert, "Timer Tick");

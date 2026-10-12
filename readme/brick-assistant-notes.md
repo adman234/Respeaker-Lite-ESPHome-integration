@@ -367,7 +367,7 @@ One script, `control_leds`, owns the LED. Everything else updates state (the
 | Priority | State | Look |
 |---|---|---|
 | 1 | Booting (HA not yet connected) | blue pulse (fast once Wi-Fi is up) |
-| 2 | Wi-Fi or API down | red slow pulse |
+| 2 | Wi-Fi or API down for 30+ min | very dim red slow pulse (4%) |
 | 3 | Siren | red fast pulse, full brightness |
 | 4 | Timer ringing | cyan fast pulse |
 | 5 | Notification | solid pale cyan |
@@ -376,7 +376,7 @@ One script, `control_leds`, owns the LED. Everything else updates state (the
 | 8 | Thinking | **LED Thinking** colour, `Breathe` |
 | 9 | Replying | **LED Replying** colour, `Breathe` |
 | 10 | Pipeline error | red fast pulse (held 1 s) |
-| 11 | HA connected but no Assist pipeline | orange slow pulse |
+| 11 | HA connected but no Assist pipeline | orange slow pulse (shown only while connected) |
 | 12 | Timer running | yellow blip once a second |
 | 13 | Idle | **LED Idle** colour if on (night light), else off |
 
@@ -405,6 +405,19 @@ One script, `control_leds`, owns the LED. Everything else updates state (the
     HA records every change, so its history shows what the LED logic was stuck on.
 
 The old **LED Light** entity is gone; HA will show it as unavailable, so delete it.
+
+### Short outages stay dark
+
+Home Assistant is routinely down for 15 to 20 minutes during the nightly Unraid appdata
+backup (confirmed from the HA logbook: "Home Assistant stopped" 03:07, started again 03:24).
+A short outage therefore shows no red at all: the LED follows the normal idle behaviour
+(LED Idle colour, off by default). Only after 30 continuous minutes without Wi-Fi or Home
+Assistant does a very dim (4 %) red pulse appear. Tune with the `offline_led_delay_ms` and
+`offline_led_brightness` substitutions in the base file.
+
+The API `reboot_timeout` is 60 min instead of ESPHome's default 15 min. At 15 min the
+speakers rebooted themselves in the middle of the backup (and showed the bright blue
+boot animation); 60 min outlasts the backup but still recovers a genuinely hung speaker.
 
 ### Why the old LED was buggy
 
