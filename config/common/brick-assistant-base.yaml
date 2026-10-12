@@ -1682,6 +1682,18 @@ voice_assistant:
               id: play_sound
               priority: true
               sound_file: "error_cloud_expired_sound"
+    # A follow-up round (the reply ended in a question, so Home Assistant said
+    # continue_conversation) that heard nothing. ESPHome only clears its continue-conversation
+    # flag in request_stop(), and an error does not call it. In HA mode the device then restarts
+    # its continuous stream without the wake word flag, so every ~16 s a new listen-for-speech
+    # round opens, forever. voice_assistant.stop clears the flag; start_ha_wake_word resumes
+    # normal wake word streaming (the same pair the "stop" word uses).
+    - if:
+        condition:
+          lambda: return code == "stt-no-text-recognized";
+        then:
+          - voice_assistant.stop:
+          - script.execute: start_ha_wake_word
 
   on_start:
     - logger.log: "VA: on_start"
