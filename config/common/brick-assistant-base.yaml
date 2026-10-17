@@ -527,8 +527,7 @@ select:
           then:
             - script.execute: start_ha_wake_word
           else:
-            # Ends continuous streaming; the on-device model takes over again.
-            - voice_assistant.stop:
+            - script.execute: stop_ha_wake_word
   - platform: logger
     id: logger_select
     name: Logger Level
@@ -1123,16 +1122,38 @@ script:
               - lambda: return id(ha_wake_word);
               - api.connected:
           then:
-            # A stop request needs a few loops to reach idle; start is ignored until then.
+            # Start is ignored until the assistant is idle: a stop request needs a few loops, and a
+            # turn started on the device (engine switched mid-conversation) runs until it ends. No
+            # timeout, or streaming would never start after such a turn; mode: restart replaces it.
             - wait_until:
-                timeout: 3s
+                not:
+                  voice_assistant.is_running:
+            - if:
                 condition:
-                  not:
-                    voice_assistant.is_running:
-            # Nothing is running now, so any turn (e.g. one ended by "stop") is over.
-            - script.execute: ha_turn_over
-            - lambda: id(va).set_wake_word("");
-            - voice_assistant.start_continuous:
+                  lambda: return id(ha_wake_word);
+                then:
+                  # Nothing is running now, so any turn (e.g. one ended by "stop") is over.
+                  - script.execute: ha_turn_over
+                  - lambda: id(va).set_wake_word("");
+                  - voice_assistant.start_continuous:
+
+  # Ends continuous streaming so the on-device model takes over again. If a conversation is in
+  # progress (e.g. an automation switched engines because the TV paused for it), let it finish first.
+  - id: stop_ha_wake_word
+    mode: restart
+    then:
+      - wait_until:
+          timeout: 2min
+          condition:
+            lambda: |-
+              return !id(va).is_running() ||
+                     id(voice_assistant_phase) == ${voice_assist_idle_phase_id} ||
+                     id(voice_assistant_phase) == ${voice_assist_not_ready_phase_id};
+      - if:
+          condition:
+            lambda: return !id(ha_wake_word);
+          then:
+            - voice_assistant.stop:
 
   # HA mode: a turn is over. Un-duck, disarm "stop" and return the LED to idle.
   - id: ha_turn_over
