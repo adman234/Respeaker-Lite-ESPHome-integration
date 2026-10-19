@@ -83,3 +83,11 @@ boot: the ReSpeaker LED flashes yellow while installing and green when done.
 - [TTS URI event](readme/tts_uri.md) for sending responses to another media player
 - [Daily alarms](readme/alarms.md)
 - [3D printable case](casing/Casing.md)
+
+## License
+
+[formatBCE/Respeaker-Lite-ESPHome-integration](https://github.com/formatBCE/Respeaker-Lite-ESPHome-integration) has no license file, so it is "all rights reserved" by default and I cannot
+license this fork. I keep my changes here for my own use and to offer back to the
+author. If you want to reuse any of it, ask the upstream author first. Nothing in
+this repository grants a license to the upstream code, and the changes I made
+cannot be separated from it.
