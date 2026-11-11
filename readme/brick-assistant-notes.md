@@ -18,10 +18,20 @@ near here", not as permanent addresses.
 
 ### Layout
 
+Since 2026-11 the Brick builds on upstream's split packages (see §9 for every
+"took upstream / kept ours" call):
+
 | File | What it holds |
 |---|---|
-| `config/common/brick-assistant-base.yaml` | Everything shared. Pulled from GitHub at build time via `packages:`. |
+| upstream `packages/respeaker-lite/hardware.yaml` | XMOS, I2S, mic, speaker, XMOS firmware update. Pulled from formatBCE at tag `2026.10.4`. |
+| upstream `packages/core/{base,voice-assistant,media-player,timers-alarm}.yaml` | The satellite core: wake words, VA phases, sounds, timers, alarm, snooze. Same tag. |
+| `packages/brick/device.yaml` | Fork-owned stand-in for upstream's `packages/lite/device.yaml`: Brick wiring (button on GPIO4, WS2812 on GPIO1), the Koala-style LED state machine and supervisor, siren, notification, button sounds. |
+| `config/common/brick-assistant-base.yaml` | Pulls the above in, then device identity, network and the fork's behaviour overrides. Pulled from GitHub at build time via `packages:`. |
 | `config/devices/respeaker-lite-1.yaml`, `-2.yaml` | ~30 lines each: `name`, `friendly_name`, `ap_ssid` substitutions, the API key secret, and the local `hey_robo_joe` model. |
+
+Upstream's `packages/lite/device.yaml` and `packages/core/controls.yaml` are not used.
+
+**Needs ESPHome 2026.10.0 or newer** on the build server (upstream's packages refuse older).
 
 Copy a device file into the ESPHome config dir (`/data` in the container) to use it.
 Changes to the base take effect on the next build after they are pushed to `main`
@@ -34,7 +44,7 @@ To change a field of something the base defines, use `!extend <id>`.
 `respeaker_lite__speaker_api_key` and **`respeaker_ap_password`** (new; the fallback
 hotspot password used to be hard-coded in the YAML).
 
-This is a different hardware mapping from upstream's `respeaker-satellite-base.yaml`
+This is a different hardware mapping from upstream's `packages/lite/device.yaml`
 (which uses GPIO3 as the button and GPIO4 as a mute output). Don't mix the two.
 
 ---
@@ -248,10 +258,12 @@ Two ways to change it:
   `get_wake_words()` already excludes internal-only models, so the `stop` word keeps its
   own 0.4 and barge-in is unaffected.
 
-`kenobi` is skipped as well, because this package sets its cutoff to 0.7 explicitly. It was the
-first model the seeding loop met on the original version, so a fresh flash adopted 0.7 and made
-every custom wake word far more trigger-happy. Seeding now takes the **strictest** manifest
-default among the models the slider governs, so it can never loosen a device on its own.
+`kenobi` used to be skipped too, because the old base pinned its cutoff to 0.7. Upstream's core
+no longer pins it and the sensitivity select does not calibrate it, so since the 2026-11 rebase
+the slider governs `kenobi` as well. Seeding takes the **strictest** manifest default among the
+models the slider governs, so it can never loosen a device on its own. (On the original version
+`kenobi`'s 0.7 was the first value the seeding loop met, which made every custom wake word far
+more trigger-happy.)
 
 Cutoffs are quantized `uint8`, so the slider converts: `cutoff = round(percent * 255 / 100)`
 (97% -> 247). The `custom_cutoff_seeded` global marks whether seeding has happened: ESPHome always
@@ -476,12 +488,16 @@ Model list (base + device file):
 
 | # | id | internal | cutoff |
 |---|---|---|---|
-| 0 | `okay_nabu` | no | 0.7 |
-| 1 | `kenobi` | no | 0.7 |
-| 2 | `hey_jarvis` | no | 0.7 |
-| 3 | `hey_mycroft` | no | 0.8 |
-| 4 | `stop` | **yes** | 0.4 |
-| 5 | `hey_robo_joe` | no | *(from manifest)* |
+| 0 | `okay_nabu` | no | sensitivity select (upstream) |
+| 1 | `kenobi` | no | Custom wake word cutoff slider |
+| 2 | `hey_jarvis` | no | sensitivity select (upstream) |
+| 3 | `hey_mycroft` | no | sensitivity select (upstream) |
+| 4 | `stop` | **yes** | 0.4 (ours; upstream uses the manifest's 0.5) |
+| 5 | `snooze` | **yes** | manifest (upstream; snoozes a ringing timer or alarm) |
+| 6 | `hey_robo_joe` | no | Custom wake word cutoff slider |
+
+Items 0 to 5 come from upstream's `packages/core/voice-assistant.yaml` since the 2026-11
+rebase (§9). The numbered list above describes the pre-rebase fork and is kept for history.
 
 `hey_robo_joe` deliberately has **no `probability_cutoff` override**. The manifest
 carries the value the training run produced. Add an override only after checking
@@ -561,8 +577,88 @@ In HA mode:
       `select` entity IDs.
 - [ ] **`hey_robo_joe` isn't wired into the "Wake word sensitivity" select.**
       Same as `kenobi`. Adding it needs quantized uint8 values (`0.85` → `217`).
-- [ ] Not ported from Koala/upstream (possible later): alarm clock (`datetime` +
-      time sync), Improv BLE provisioning, factory-reset long press.
+- [ ] Not ported from upstream (possible later): alarm-on LED state, Improv BLE
+      provisioning, factory-reset long press (§9).
+- [ ] Offer the `stt-no-text-recognized` fix upstream (§9).
+
+---
+
+## 9. Upstream sync (2026-11, upstream tag 2026.10.4)
+
+Upstream split its firmware into `packages/core`, `packages/<hardware>` and
+`packages/<device>` on 2026-10-19. The fork merged `upstream/main` (keeping the fork
+README) and rebuilt the Brick on top of the split. Rule used: where both sides built
+the same feature, take upstream's code; where the fork did something upstream does
+not, keep it as an override on top.
+
+### How the overrides work
+
+- Plain lists **append**: a `voice_assistant: on_error:` list in the base runs after
+  upstream's actions. Used for `on_client_connected`, `on_error`, `on_stt_end`.
+- `!extend <id>` / `!remove <id>` change or drop upstream list items (speakers,
+  media player, wake word models, switches).
+- To **replace** an upstream automation, write it in dict form (`on_x:` then `then:`).
+  A dict replaces a list outright. Used for `micro_wake_word: on_wake_word_detected`,
+  `voice_assistant: on_start` and `on_end`. This depends on upstream writing those as
+  plain lists; check after every bump (`esphome config` output should show one handler).
+- `!remove` on a dict key does **not** work across packages: ESPHome flattens the
+  package tree and merges from the highest layer down, so a lower layer's removal is
+  overwritten by the layer that re-adds the key.
+
+### Took upstream
+
+| Feature | Notes |
+|---|---|
+| Stuck LED after a response | Upstream's explicit WS2812 timings (bit timings, 300 us reset, 15 ms refresh) replace `chipset: ws2812`. |
+| Stop-word wait | Upstream's `activate_stop_word_once` and stop-model handling. |
+| XMOS failure LED | `control_leds` now starts with "XMOS failed to start: static red, full brightness". |
+| Sounds | Upstream's Opus sounds and `play_sound(priority, sound_file)`. The Brick still adds siren, click, notification and connection-problem sounds. |
+| Microphone | Upstream's decimator microphone in `hardware.yaml`. |
+| Timers, alarm, snooze | Upstream's `timer_ringing` (15 min ring timeout, any wake word stops it, "Snooze" snoozes). Kept visible in HA as **Timer Ring** via `!extend`. New entities: Alarm on/time/action, Snooze enabled/duration/pending/cancel. |
+| Mute sounds | Upstream's **Mute-unmute sound** switch. The Brick's button click is skipped when it is on, so one press never makes two sounds. |
+| Ducking | Upstream's 20 dB announcement ducking. |
+| Wake word models and sensitivity select | Upstream's list (now with internal `snooze`). |
+
+### Kept ours
+
+| Feature | Where |
+|---|---|
+| `stt-no-text-recognized` fix (`voice_assistant.stop` + `start_ha_wake_word`) | base `on_error` (appended). Upstreamable. |
+| Live custom wake word cutoff slider | `device.yaml` (`apply_custom_wake_word_cutoff`), run from base `on_boot`. |
+| **Wake word engine location** select (HA wake word mode, shadow logging) | `device.yaml` select, plus the base's replaced `on_wake_word_detected` / `on_start` / `on_end`, `on_idle` and VA `on_wake_word_detected`. |
+| LED supervisor / watchdog and **Assistant status** sensor | `device.yaml`. |
+| Dim LED, 30 min disconnected-indicator delay | `device.yaml` substitutions `offline_led_delay_ms`, `offline_led_brightness`. |
+| Switches that wait for an active conversation | `device.yaml`. |
+| Barge-in turn logic (`wake_pending`, chime wait, `on_end` guard) | base `on_wake_word_detected` / `on_end`. |
+| Mono speaker, `volume_min` 0.3 / `volume_max` 0.8 | base `!extend`. |
+| `stop` cutoff 0.4, VAD cutoff 0.1 | base. Upstream: manifest 0.5, VAD 0.05. |
+| `api: reboot_timeout: 60min`, 8 MB flash, Wi-Fi TX 12.5 dBm | base / `device.yaml`. |
+| Brick buttons (GPIO4 volume down/stop/long press, XMOS mute double toggle = volume up) | `device.yaml`. |
+| Button sound, Disable physical controls | Recreated in `device.yaml` because upstream's `controls.yaml` (GPIO3 button) is not included. |
+
+### Mic mute without `mute_toggle`
+
+Upstream's `mute_toggle` is a GPIO4 output that pulses the XMOS mute line, and its
+**Mic mute** switch drives that pulse. On the Brick GPIO4 is the user button input, so
+`mute_toggle` is removed. `mic_mute_switch` is replaced by an internal, read-only mirror
+of the XMOS mute state (`mute_state`): it still plays upstream's mute sounds and still
+makes the wake word handler ignore detections while muted, but turning it on or off
+from an automation only logs a warning. Mute with the hardware button; Home Assistant
+sees the state as the **Mic muted** binary sensor.
+
+### Not ported
+
+- Upstream's alarm-on LED state (the Brick LED does not show an armed alarm).
+- Improv BLE provisioning and factory-reset long press (upstream `controls.yaml`).
+
+### Bumping upstream
+
+1. Change `ref:` and `respeaker_lite_ref` in the base to the new tag (keep them equal).
+2. Read upstream's changes to the core and `respeaker-lite` packages.
+3. `esphome config` a device file: check there is still exactly one
+   `micro_wake_word: on_wake_word_detected`, `voice_assistant: on_start` and `on_end`
+   handler (ours), and that `mute_toggle` is absent.
+4. Compile both devices, then flash.
 
 ---
 
