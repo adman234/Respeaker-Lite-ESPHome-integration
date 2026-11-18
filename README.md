@@ -3,13 +3,13 @@
 ESPHome firmware that turns a Seeed ReSpeaker Lite Voice Kit (XIAO ESP32-S3) into a Home
 Assistant voice satellite with the same features as the Home Assistant Voice PE.
 
-This is a fork of [formatBCE/Respeaker-Lite-ESPHome-integration](https://github.com/formatBCE/Respeaker-Lite-ESPHome-integration)
+This is a fork of [formatBCE/Respeaker-ESPHome-integration](https://github.com/formatBCE/Respeaker-ESPHome-integration)
 by Andrii Mitnovych ([formatBCE](https://github.com/formatBCE)), who wrote the firmware,
 the custom `respeaker_lite` component, the blueprints and the case. His work builds on the
 [Voice PE firmware](https://github.com/esphome/home-assistant-voice-pe) by the ESPHome team
 and on [Seeed's ReSpeaker Lite firmware](https://github.com/respeaker/ReSpeaker_Lite). If
 you find it useful, you can [support formatBCE](https://www.buymeacoffee.com/formatbce).
-He has since moved on to [Koala Satellite](https://github.com/formatBCE/Koala-Satellite).
+Upstream now also covers the Koala and ReSpeaker XVF3800 devices; this fork only adds to the ReSpeaker Lite.
 
 The upstream files are kept unchanged so the fork can keep syncing with formatBCE. This fork's
 changes live alongside them in their own package and are not intended to be merged upstream.
@@ -82,7 +82,7 @@ boot: the ReSpeaker LED flashes yellow while installing and green when done.
 - [Blueprints](readme/blueprints.md) for use with the satellite
 - [TTS URI event](readme/tts_uri.md) for sending responses to another media player
 - [Daily alarms](readme/alarms.md)
-- [3D printable case](casing/Casing.md)
+- [3D printable case](casing/lite/Casing.md)
 
 ## License
 
