@@ -101,7 +101,10 @@ interval:
           }
           std::string effect = id(current_led_effect);
           if (effect == "off") {
-            return;
+            // Keep sending the dark frame. The driver skips it on the bus,
+            // except for the periodic re-send that repairs a lost frame.
+            uint32_t colors[12] = {0};
+            id(respeaker).set_led_ring(colors);
           } else if (effect == "solid") {
             id(update_solid_effect).execute();
           } else if (effect == "breathe") {
@@ -155,7 +158,7 @@ script:
 
   # Steady ring. This is what the "LED Ring" light shows when Home Assistant
   # selects no effect. The C++ driver drops an unchanged frame, so a steady
-  # ring costs no I2C traffic.
+  # ring costs one I2C write per second, the periodic re-send.
   - id: update_solid_effect
     then:
       - lambda: |-

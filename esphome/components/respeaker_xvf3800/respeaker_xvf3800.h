@@ -264,7 +264,8 @@ class RespeakerXVF3800 : public i2c::I2CDevice, public Component {
   // Public methods for child components
   bool read_gpo_values(uint8_t *buffer, uint8_t *status);
   bool read_gpio_status(uint32_t *gpio_status);
-  bool read_mute_status();
+  // Returns false if the DSP gave no valid answer; `muted` is then unchanged.
+  bool read_mute_status(bool &muted);
   void write_mute_status(bool value);
   // Reads the Mute button. Returns false if the DSP gave no valid answer.
   bool read_mute_button(bool &pressed);
@@ -359,8 +360,12 @@ class RespeakerXVF3800 : public i2c::I2CDevice, public Component {
   static constexpr uint32_t AZIMUTH_MAX_AGE_MS = 500;
 
   // Last frame written by set_led_ring(), so an unchanged frame skips the bus.
+  // A frame can be lost or garbled with no I2C error, so an unchanged frame is
+  // still re-sent every LED_FRAME_REFRESH_MS (issue #115).
   uint32_t last_led_frame_[12]{};
   bool led_frame_valid_{false};
+  uint32_t led_frame_sent_ms_{0};
+  static constexpr uint32_t LED_FRAME_REFRESH_MS = 1000;
 
   // The chip resets these on power-up; they are (re)applied after boot.
   bool asr_route_{false};
@@ -372,7 +377,8 @@ class RespeakerXVF3800 : public i2c::I2CDevice, public Component {
   void write_agc_max_gain_();
 
   // Helper method for XMOS communication
-  void xmos_write_bytes(uint8_t resid, uint8_t cmd, const uint8_t *value, uint8_t write_byte_num);
+  // Returns false on an I2C error. True does not prove that the chip applied it.
+  bool xmos_write_bytes(uint8_t resid, uint8_t cmd, const uint8_t *value, uint8_t write_byte_num);
 
   // Reads one of the four AEC azimuth slots (radians) returned by cmd 75:
   //   0 = beam 1 (fixed beam 1 when fixed mode is on)
