@@ -243,6 +243,24 @@ number:
     icon: "mdi:auto-fix"
     on_value:
       - lambda: id(respeaker).set_agc_max_gain(x);
+  # Gain on the analog outputs of the codec, in dB on top of the level that the
+  # XVF3800 firmware sets. 0 leaves the outputs as the firmware set them. The
+  # on-board amplifier distorts above about 2.5-3 W, so raise it one step at a
+  # time, and only with an external amplifier on the line out.
+  - platform: template
+    name: "Output gain"
+    id: output_gain
+    optimistic: true
+    restore_value: yes
+    initial_value: 0
+    min_value: 0
+    max_value: 6
+    step: 1
+    unit_of_measurement: dB
+    entity_category: config
+    icon: "mdi:volume-plus"
+    on_value:
+      - lambda: id(aic3104_dac).set_output_gain((uint8_t) x);
 
 select:
   # channel 0 -> STT, channel 1 -> micro_wake_word.

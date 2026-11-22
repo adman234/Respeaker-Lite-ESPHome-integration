@@ -240,7 +240,8 @@ or the component fails; on a mismatch `setup()` starts the update itself (`start
 `respeaker_xvf3800.flash` action), a non-blocking state machine in `loop()` that sends 128-byte blocks.
 `packages/xvf3800/hardware.yaml` reports the result in the `dsp_status` text sensor (`OK`, `Update failed`,
 `No response`). The triggers compile only when `USE_RESPEAKER_XVF3800_STATE_CALLBACK` is defined. To change the
-firmware, update the binary, the `version`, and the `md5` together.
+firmware, update the binary, the `version`, and the `md5` together. Then read the four output level registers again and
+update the levels in `AIC3104::apply_output_gain_()`.
 
 ### XVF3800: LED ring and mute button
 
