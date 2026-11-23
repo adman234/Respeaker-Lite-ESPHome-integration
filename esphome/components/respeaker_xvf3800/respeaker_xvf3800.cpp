@@ -374,19 +374,23 @@ bool RespeakerXVF3800::read_gpo_values(uint8_t *buffer, uint8_t *status) {
   return true;
 }
 
-bool RespeakerXVF3800::read_mute_status() {
+bool RespeakerXVF3800::read_mute_status(bool &muted) {
   uint8_t gpo_values[5] = {0};
   uint8_t status = 0xFF;
-  
-  if (this->read_gpo_values(gpo_values, &status)) {
-    ESP_LOGD(TAG, "GPO Status: %02X, GPO data: %02X %02X %02X %02X %02X", 
-             status, gpo_values[0], gpo_values[1], gpo_values[2], gpo_values[3], gpo_values[4]);
-    
-    bool gpio30 = (gpo_values[1] & 0x01) != 0;
-    ESP_LOGD(TAG, "GPIO30 (mute): %s", gpio30 ? "MUTED" : "UNMUTED");
-    return gpio30;
+
+  if (!this->read_gpo_values(gpo_values, &status)) {
+    return false;
   }
-  return false;
+  ESP_LOGD(TAG, "GPO Status: %02X, GPO data: %02X %02X %02X %02X %02X",
+           status, gpo_values[0], gpo_values[1], gpo_values[2], gpo_values[3], gpo_values[4]);
+  // CTRL_WAIT and SERVICER_COMMAND_RETRY carry no valid payload. The next poll is the retry.
+  if (status != CTRL_DONE) {
+    return false;
+  }
+
+  muted = (gpo_values[1] & 0x01) != 0;
+  ESP_LOGD(TAG, "GPIO30 (mute): %s", muted ? "MUTED" : "UNMUTED");
+  return true;
 }
 
 void RespeakerXVF3800::write_mute_status(bool value) {
@@ -544,7 +548,7 @@ float RespeakerXVF3800::get_azimuth_degrees() const {
   return degrees < 0.0f ? degrees + 360.0f : degrees;
 }
 
-void RespeakerXVF3800::xmos_write_bytes(uint8_t resid, uint8_t cmd, const uint8_t *value, uint8_t write_byte_num) {
+bool RespeakerXVF3800::xmos_write_bytes(uint8_t resid, uint8_t cmd, const uint8_t *value, uint8_t write_byte_num) {
   uint8_t payload[3 + 255];
   payload[0] = resid;
   payload[1] = cmd;
@@ -558,17 +562,20 @@ void RespeakerXVF3800::xmos_write_bytes(uint8_t resid, uint8_t cmd, const uint8_
   
   if (err != i2c::ERROR_OK) {
     ESP_LOGW(TAG, "Error in xmos_write_bytes. resid=%d, cmd=%d, error=%d", resid, cmd, (int)err);
+    return false;
   }
+  return true;
 }
 
 void RespeakerXVF3800::set_led_ring(uint32_t *rgb_array) {
   // The YAML animation interval calls this 20 times a second whether the frame
-  // changed or not. Skip the bus when it did not.
-  if (this->led_frame_valid_ && memcmp(this->last_led_frame_, rgb_array, sizeof(this->last_led_frame_)) == 0) {
+  // changed or not. Skip the bus when it did not, but re-send it now and then:
+  // a dropped or garbled frame would otherwise stay on the ring for good.
+  const uint32_t now = millis();
+  if (this->led_frame_valid_ && now - this->led_frame_sent_ms_ < LED_FRAME_REFRESH_MS &&
+      memcmp(this->last_led_frame_, rgb_array, sizeof(this->last_led_frame_)) == 0) {
     return;
   }
-  memcpy(this->last_led_frame_, rgb_array, sizeof(this->last_led_frame_));
-  this->led_frame_valid_ = true;
 
   uint8_t payload[48];
   
@@ -582,7 +589,12 @@ void RespeakerXVF3800::set_led_ring(uint32_t *rgb_array) {
   
   const uint8_t cmd = this->chip_version_at_least_(1, 0, 8) ? GPO_SERVICER_RESID_LED_RING_VALUE
                                                             : GPO_SERVICER_RESID_LED_RING_VALUE_PRE_1_0_8;
-  this->xmos_write_bytes(GPO_SERVICER_RESID, cmd, payload, 48);
+  // Cache only a frame that reached the chip, so a failed one is sent again.
+  this->led_frame_valid_ = this->xmos_write_bytes(GPO_SERVICER_RESID, cmd, payload, 48);
+  if (this->led_frame_valid_) {
+    memcpy(this->last_led_frame_, rgb_array, sizeof(this->last_led_frame_));
+    this->led_frame_sent_ms_ = now;
+  }
 }
 
 std::string RespeakerXVF3800::read_dfu_version() {
@@ -674,8 +686,11 @@ void MuteSwitch::update() {
     return;
   }
 
-  bool mute_state = this->parent_->read_mute_status();
-  
+  bool mute_state;
+  if (!this->parent_->read_mute_status(mute_state)) {
+    return;
+  }
+
   if (this->state != mute_state) {
     this->publish_state(mute_state);
   }

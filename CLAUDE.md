@@ -19,8 +19,8 @@ package.
 The XVF3800 and Koala firmware came from the repositories `Respeaker-XVF3800-ESPHome-integration` and `Koala-Satellite`.
 Those repositories are frozen. Their old tags still serve old user configurations.
 
-There is no test suite and no linter configuration. The only CI workflow is `.github/workflows/release.yaml`, which builds
-and publishes releases.
+There is no test suite and no linter configuration. The CI workflows are `.github/workflows/prepare-release.yaml`, which
+opens the release pull request, and `.github/workflows/release.yaml`, which builds and publishes releases.
 
 ## Commands
 
@@ -177,6 +177,10 @@ numbers come from the `substitutions:` block of `packages/core/base.yaml`.
 timeout in a script: a `delay` inside `on_turn_on` keeps running after turn-off (ESPHome runs re-triggered automation
 delays in parallel) and cuts a later ring short.
 
+A template switch runs `on_turn_on` and `on_turn_off` before it publishes the new state. So in those triggers,
+`id(timer_ringing).state` still has the old value. Give the new state to a script as a parameter, as the calls of
+`apply_wake_word_sensitivity` do.
+
 "Snooze" is handled in the ringing branch of `on_wake_word_detected`, matched by the model's `wake_word` string.
 `snooze_ring` stores an epoch deadline in the restored `snooze_until` global (0 = none) and turns the ring off. A 1 s
 `interval` turns `timer_ringing` on at the deadline and drops a deadline that is more than 15 min old (the device was
@@ -184,6 +188,14 @@ off). Without a valid clock, "Snooze" is ignored and the ring continues. The `st
 window on purpose, so a false "Stop" cannot lose a wake-up. `Cancel snooze`, setting `alarm_time`, turning
 `snooze_enabled` off, or turning `alarm_on` off clear the deadline. The `alarm_on` case is detected in that interval,
 not in `alarm_on`'s triggers, because Koala replaces those triggers with `then:` blocks.
+
+### Wake word verification
+
+Home Assistant can ask for wake word audio when it can verify all active wake words. Then
+`id(va).is_wake_word_audio_active()` is true, and `apply_wake_word_sensitivity` sets lower cutoffs on `okay_nabu`,
+`hey_jarvis` and `hey_mycroft`. The device plays no wake sound and ducks media only after Home Assistant accepts the
+wake word. A rejection (`on_wake_word_rejected`) sets the idle phase. A ringing timer keeps the normal cutoffs, because
+it stops on any wake word without verification. `kenobi`, `stop` and `snooze` keep the cutoffs of their models.
 
 ### Audio pipeline
 
@@ -238,7 +250,8 @@ or the component fails; on a mismatch `setup()` starts the update itself (`start
 `respeaker_xvf3800.flash` action), a non-blocking state machine in `loop()` that sends 128-byte blocks.
 `packages/xvf3800/hardware.yaml` reports the result in the `dsp_status` text sensor (`OK`, `Update failed`,
 `No response`). The triggers compile only when `USE_RESPEAKER_XVF3800_STATE_CALLBACK` is defined. To change the
-firmware, update the binary, the `version`, and the `md5` together.
+firmware, update the binary, the `version`, and the `md5` together. Then read the four output level registers again and
+update the levels in `AIC3104::apply_output_gain_()`.
 
 ### XVF3800: LED ring and mute button
 
@@ -270,18 +283,28 @@ the ESP misbehaves.
 
 ## Conventions
 
-- `esphome.min_version` tracks the ESPHome release that the firmware needs, now `2026.10.0`. Keep `ESPHOME_VERSION` in
+- `esphome.min_version` tracks the ESPHome release that the firmware needs, now `2026.11.0`. Keep `ESPHOME_VERSION` in
   `.github/workflows/release.yaml` at or above it.
-- Releases use plain CalVer tags without a `v`, for example `2026.9.1`. One tag serves all devices. To prepare a
-  release, set the new version in ten places:
+- ESPHome 2026.11 does not include wake word audio (esphome/esphome#21885). So `core/voice-assistant.yaml` gets `api`,
+  `micro_wake_word` and `voice_assistant` from the ESPHome commit that merged it, the same as Voice PE. Remove that
+  `external_components` block when `min_version` becomes the first ESPHome release that includes the PR.
+- Releases use plain CalVer tags without a `v`, for example `2026.9.1`. One tag serves all devices. The new version goes
+  in eleven places:
   - the `respeaker_lite_ref` default in `packages/core/base.yaml`;
   - `esphome.project.version` in `packages/lite/device.yaml`, `packages/xvf3800/base.yaml`, `packages/koala/device.yaml`;
-  - `respeaker_lite_ref` in the three user examples and the three factory configs in `config/`.
+  - `respeaker_lite_ref` in the three user examples and the three factory configs in `config/`;
+  - `respeaker_lite_ref` in the example of `readme/xvf3800/README.md`.
 
-  The default must equal the tag, because a pinned package then gets the components, the models, and the firmware from
-  the same release.
-- Push that commit to `main`. `.github/workflows/release.yaml` then runs: `prepare` reads the **first** `version:` line of
-  `packages/lite/device.yaml`, checks that the tag does not exist and that all ten places equal the version; `build` is a
+  `.github/scripts/release-version.sh` holds that list. `check <version>` fails if a place holds another value.
+  `bump <version>` sets the version, then checks. Add a new place to the list, not to a workflow. The default must equal
+  the tag, because a pinned package then gets the components, the models, and the firmware from the same release.
+- To prepare a release, run `.github/workflows/prepare-release.yaml` (Actions > Prepare release > Run workflow). An empty
+  `version` input gives the next version: the patch after the latest tag in the same month, else `<year>.<month>.0`. The
+  workflow checks the version, runs `bump` on a `release/<version>` branch from `main`, and opens a draft pull request
+  with the changes since the latest tag. It needs "Allow GitHub Actions to create and approve pull requests" in the
+  repository settings. Merge that pull request to publish.
+- The merge to `main` starts `.github/workflows/release.yaml`: `prepare` reads the **first** `version:` line of
+  `packages/lite/device.yaml`, checks that the tag does not exist and runs `release-version.sh check`; `build` is a
   matrix over `lite`, `xvf3800`, `koala`, installs the pinned `ESPHOME_VERSION`, points the factory config's
   `respeaker_lite_ref` at the commit SHA (the tag does not exist yet), runs the pinned `ewt-gen` with
   `--publish-url https://formatbce.github.io/Respeaker-ESPHome-integration/<device>`, and checks that the generated

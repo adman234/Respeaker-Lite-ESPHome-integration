@@ -55,7 +55,7 @@ The **LED Ring** light controls the 12-LED ring. Read
 
 ## Requirements
 
-- ESPHome **2026.10.0** or later.
+- ESPHome **2026.11.0** or later.
 - Home Assistant with the ESPHome integration.
 - A reSpeaker XVF3800 USB 4-Mic Array board.
 - A USB-C cable and a computer that can flash the board.
@@ -92,7 +92,7 @@ Create a file for your device. The packages give all the other configuration.
 substitutions:
   name: respeaker-xvf3800-assistant
   friendly_name: reSpeaker XVF3800 Assistant
-  respeaker_lite_ref: 2026.11.1
+  respeaker_lite_ref: 2026.11.2
 
 packages:
   respeaker:
@@ -460,6 +460,22 @@ The XMOS resets these parameters on power-up. The `respeaker_xvf3800` component
 applies the route and the two gains after the version read, and applies a change
 as soon as you set it. Home Assistant saves the route and both numbers and
 restores them at the next boot.
+
+### Output gain
+
+The **Output gain** number adds 0 to +6 dB to the analog outputs of the codec,
+in 1 dB steps, on top of the level that the XVF3800 firmware sets. At 0 dB the
+outputs stay as the firmware set them. The number is useful with an external
+amplifier on the line out, where the media player volume leaves too little level.
+
+**Caution:** The gain is added after the media player volume. The on-board
+amplifier distorts above about 2.5 to 3 W, and a high gain with the volume near
+100 % clips. Raise it one step at a time. Do not raise it with a speaker on the on-board amplifier.
+
+The XVF3800 resets the codec when it restarts, for example after a DSP firmware
+update. The component applies the gain 5 seconds after boot and checks it every
+minute. It writes the registers only if they differ, and logs a line at INFO
+level when it does. The device keeps the value over restarts.
 
 ---
 
