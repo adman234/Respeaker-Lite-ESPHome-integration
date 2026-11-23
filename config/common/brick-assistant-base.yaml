@@ -28,12 +28,12 @@ substitutions:
   # Fallback hotspot name shown when Wi-Fi is unreachable. Make it unique per device.
   ap_ssid: "Respeaker-Lite Hotspot"
   # Upstream tag used for its sounds, models and XMOS firmware. Keep equal to `ref:`.
-  respeaker_lite_ref: 2026.10.4
+  respeaker_lite_ref: 2026.11.2
 
 packages:
   upstream:
     url: https://github.com/formatBCE/Respeaker-Lite-ESPHome-integration
-    ref: 2026.10.4
+    ref: 2026.11.2
     refresh: 1d
     files:
       - packages/respeaker-lite/hardware.yaml
